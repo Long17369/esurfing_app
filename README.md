@@ -1,0 +1,86 @@
+# 校园网助手（esurfing_app）
+
+`esurfing_c` 的图形界面前端。Flutter 负责 UI 与状态，协议、加密、网卡与会话全部
+复用 `esurfing_c` 的 C API（`include/esurfing.h`），通过 `dart:ffi` 调用。
+
+**本期范围：Windows x64 + Android。** macOS / iOS 的原生产物、平台壳与验证
+留到后续 Apple 分支；代码里保留了对应加载分支，但本期不构建、不测试、不打包。
+
+## 功能
+
+- 登录 / 登出，错误码引导（102 已有会话、105 账号受限、14 无会话等）
+- 保活（默认永久保活，登录后自动启动）
+- 多账号档案、单活动会话、切换账号
+- Windows：托盘常驻、关闭到托盘、开机自启、启动最小化、单实例
+- Android：前台服务常驻通知、开机自启、电池优化白名单引导
+- 日志页（最近 500 条 + 文件轮转）
+
+## 目录
+
+```
+lib/src/ffi/       esf_* 绑定、结构体、后台会话 isolate
+lib/src/state/     AppController（ChangeNotifier）与 isolate 客户端
+lib/src/data/      配置 JSON、安全存储、Client-ID / 伪 MAC、日志
+lib/src/ui/        主页、账号、设置、日志
+lib/src/platform/  桌面托盘壳、Android 权限壳
+android/           Kotlin 前台服务 / 常驻 FlutterEngine / 开机广播
+tool/              原生库构建与打包脚本
+```
+
+## 构建前置
+
+| 用途 | 依赖 |
+|---|---|
+| Flutter | Flutter 3.47+ / Dart 3.13+ |
+| Android | Android SDK、NDK **28.2.13676358**、JDK 17+ |
+| Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake`） |
+| Windows 应用 | Visual Studio 2022（Desktop development with C++） |
+
+## 构建原生后端
+
+```bash
+# Android 三个 ABI + Windows DLL（Windows 部分无 MinGW 时自动跳过）
+tool/build_native.sh all
+# 只做一端
+tool/build_native.sh android
+tool/build_native.sh windows
+```
+
+产物位置：
+
+- Android：`android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libesurfing.so`
+  （已加 `-Wl,-z,max-page-size=16384`，满足 Android 15+ 的 16 KB 页要求）
+- Windows：`packages/esurfing_native/windows/esurfing.dll`
+  （CMake 在 `windows/` 构建时自动安装到 exe 同目录）
+
+## 运行与打包
+
+```bash
+flutter pub get
+flutter analyze
+flutter test
+
+flutter run -d windows     # 需要 Windows + VS2022
+flutter run -d android     # 需要真机/模拟器
+
+tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
+tool/package_android.sh    # -> dist/app-<abi>-release.apk
+```
+
+## 侧载说明
+
+- **Windows**：解压 zip 直接运行 `esurfing_app.exe`，`esurfing.dll` 必须与 exe 同目录。
+  未签名会触发 SmartScreen，选择「更多信息 → 仍要运行」。
+- **Android**：安装 APK 时允许「安装未知应用」。首次启动请授予通知权限，
+  并在系统设置里关闭本应用的电池优化、允许自启动，否则后台保活会被厂商策略中断。
+- 两端都只支持侧载，不上架应用商店。
+
+## 已知限制
+
+- 账号配置与 `esurfing_c` CLI 的配置文件不互通，需在 App 内重新录入。
+- Android 10+ 拿不到真实 Wi-Fi MAC，App 会生成并持久化一个本地管理伪 MAC
+  （首字节 `0x02`）传给 `esf_set_mac`；它只影响报文，不修改网卡。
+- 同一时刻只有一个活动会话，不支持多账号同时在线。
+- 暂不支持手动选择网卡、Shizuku 接入、原生后端热更新。
+- macOS / iOS：见后续 Apple 分支（`en0` 出口、iOS 网关探测、静态链接、
+  Keychain 与侧载证书等）。
