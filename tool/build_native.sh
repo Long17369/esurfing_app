@@ -21,21 +21,20 @@ build_android() {
     return 1
   fi
   local abi build_dir triple host_tag llvm_strip ndk_lib
-  host_tag="$(ls -d "$NDK/toolchains/llvm/prebuilt/"* 2>/dev/null | head -1)"
-  llvm_strip="$host_tag/bin/llvm-strip"
-  ndk_lib="$host_tag/sysroot/usr/lib"
-  for spec in "arm64-v8a:aarch64-linux-android" \
-              "armeabi-v7a:arm-linux-androideabi" \
-              "x86_64:x86_64-linux-android"; do
-    abi="${spec%%:*}"
-    triple="${spec##*:}"
+  local abi build_dir
+  for spec in "arm64-v8a" "armeabi-v7a" "x86_64"; do
+    abi="$spec"
     build_dir="/tmp/esf-build-$abi"
     echo "==> Android $abi"
+    # 不传 -DANDROID_STL：CMake 的 CMAKE_ANDROID_STL_TYPE 默认就是 c++_static，
+    # 也就是 C++ 运行时静态链进 libesurfing.so，只有一个 .so、无需 libc++_shared.so。
+    # 特别注意别传 -DANDROID_STL=c++_shared —— 那会让 dlopen 时报
+    # library "libc++_shared.so" not found（Flutter 不会打包 NDK 的这份）。
     cmake -S "$CORE" -B "$build_dir" \
       -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$abi" \
       -DANDROID_PLATFORM="android-$API" \
-      -DANDROID_STL=c++_shared \
+      -UANDROID_STL -UCMAKE_ANDROID_STL_TYPE \
       -DCMAKE_BUILD_TYPE=Release \
       -DESURFING_LTO=OFF \
       -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" >/dev/null
@@ -43,24 +42,14 @@ build_android() {
     mkdir -p "$ANDROID_OUT/$abi"
     cp "$build_dir/lib/esurfing.so" "$ANDROID_OUT/$abi/libesurfing.so"
     echo "    -> $ANDROID_OUT/$abi/libesurfing.so"
-
-    # Flutter 只打包 jniLibs 下的库，不会自动带上 NDK 的 libc++_shared.so；
-    # 不带就会在 dlopen("libesurfing.so") 时报 library "libc++_shared.so" not found。
-    # NDK 自带的这份是未 strip 的（约 9 MB），strip 后约 1 MB。
-    if [[ ! -f "$ndk_lib/$triple/libc++_shared.so" ]]; then
-      echo "找不到 NDK 的 libc++_shared.so：$ndk_lib/$triple" >&2
-      return 1
-    fi
-    "$llvm_strip" --strip-unneeded \
-      -o "$ANDROID_OUT/$abi/libc++_shared.so" \
-      "$ndk_lib/$triple/libc++_shared.so"
-    chmod 644 "$ANDROID_OUT/$abi/libc++_shared.so"
-    echo "    -> $ANDROID_OUT/$abi/libc++_shared.so ($(stat -c%s "$ANDROID_OUT/$abi/libc++_shared.so") 字节)"
-
     readelf -lW "$ANDROID_OUT/$abi/libesurfing.so" |
       grep -q '0x4000' || echo "    警告：未检测到 16 KB 页对齐" >&2
-    readelf -dW "$ANDROID_OUT/$abi/libesurfing.so" | grep -q 'libc++_shared' ||
-      echo "    提示：$abi 未动态依赖 libc++_shared.so（静态链接？）" >&2
+    if readelf -dW "$ANDROID_OUT/$abi/libesurfing.so" | grep -q 'libc++_shared'; then
+      echo "    错误：$abi 动态依赖 libc++_shared.so，App 内会 dlopen 失败。" >&2
+      echo "    多半是构建目录里残留了 -DANDROID_STL=c++_shared，删掉 $build_dir 重跑。" >&2
+      return 1
+    fi
+    rm -f "$ANDROID_OUT/$abi/libc++_shared.so"
   done
 }
 

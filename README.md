@@ -58,24 +58,24 @@ tool/build_native.sh windows
 
 产物位置：
 
-- Android：`android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/`
-  - `libesurfing.so`（已加 `-Wl,-z,max-page-size=16384`，满足 Android 15+ 的 16 KB 页要求）
-  - `libc++_shared.so`（从 NDK sysroot 拷入并 strip；NDK 原文件约 9 MB，strip 后约 1.2 MB）
+- Android：`android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/libesurfing.so`
+  （已加 `-Wl,-z,max-page-size=16384`，满足 Android 15+ 的 16 KB 页要求；
+  C++ 运行时静态链在库内，不依赖 `libc++_shared.so`，`jniLibs` 里只有这一个 `.so`）
 - Windows：`packages/esurfing_native/windows/esurfing.dll`
   （CMake 在 `windows/` 构建时自动安装到 exe 同目录）
 
-> **Android 的 `libc++_shared.so` 必须随 APK 一起打包**。
-> 按 NDK 默认（`ANDROID_STL=c++_shared`）构建的 `libesurfing.so` 会 `NEEDED libc++_shared.so`，
-> 而 Flutter 只打包 `jniLibs` 下的库、不会自动带上 NDK 的这份；缺了就会在
-> `dlopen("libesurfing.so")` 时报 `library "libc++_shared.so" not found`。
-> `tool/build_native.sh` 构建后会把 NDK 对应 ABI 的 `libc++_shared.so` strip 后复制进
-> `jniLibs`，与 `libesurfing.so` 同目录，AGP 随后原样打进 APK。
+> **Android 的 STL 用 CMake 默认值 `c++_static`，不要传 `-DANDROID_STL=c++_shared`。**
+> 传了 `c++_shared` 后 `libesurfing.so` 会带 `NEEDED libc++_shared.so`，而 Flutter 只打包
+> `jniLibs` 下的东西、不会带 NDK 那份，`dlopen` 时直接抛
+> `library "libc++_shared.so" not found`。
+> 静态链接后体积约 970 KB（arm64），只依赖 `libdl / libm / libc`。
 >
-> 别指望系统自带的 `/system/lib64/libc++_shared.so`：`adb shell` 里的进程能加载它，
+> 构建目录的 `CMakeCache.txt` 会记住上一次的 `ANDROID_STL`，所以 `tool/build_native.sh`
+> 每次配置都带 `-UANDROID_STL -UCMAKE_ANDROID_STL_TYPE` 清掉残留，并在构建后用
+> `readelf -d` 校验：一旦发现依赖 `libc++_shared.so` 直接报错退出。
+>
+> 也不要指望系统自带的 `/system/lib64/libc++_shared.so`：`adb shell` 里的进程能加载它，
 > 但 App 的 linker namespace 只放行 `public.libraries.txt` 白名单，该库不在其中。
->
-> `libc++_shared.so` 来自 Android NDK（Apache-2.0 WITH LLVM-exception），版本须与构建
-> `libesurfing.so` 的 NDK 一致（当前 28.2.13676358）。
 
 ## 运行与打包
 
