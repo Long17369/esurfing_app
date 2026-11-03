@@ -36,6 +36,9 @@ tool/              原生库构建与打包脚本
 | Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake`） |
 | Windows 应用 | Visual Studio 2022（Desktop development with C++） |
 
+> 首次 Android 构建需要访问 `services.gradle.org` 和 `maven.google.com`
+> 下载 Gradle 与 Android 依赖；网络受限时会长时间停在依赖解析阶段。
+
 ## 构建原生后端
 
 ```bash
