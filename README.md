@@ -39,6 +39,13 @@ tool/              原生库构建与打包脚本
 > 首次 Android 构建需要访问 `services.gradle.org` 和 `maven.google.com`
 > 下载 Gradle 与 Android 依赖；网络受限时会长时间停在依赖解析阶段。
 
+国内网络可改用镜像并只构建一个 ABI（首次会下载约 180 MB 引擎包）：
+
+```bash
+FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn \
+  flutter build apk --debug --target-platform android-arm64
+```
+
 ## 构建原生后端
 
 ```bash
