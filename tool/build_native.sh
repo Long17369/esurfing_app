@@ -20,16 +20,22 @@ build_android() {
     echo "找不到 NDK：$NDK（可设置 ANDROID_NDK_HOME）" >&2
     return 1
   fi
-  local abi build_dir
-  for spec in "arm64-v8a:arm64-v8a" "armeabi-v7a:armeabi-v7a" "x86_64:x86_64"; do
+  local abi build_dir triple host_tag llvm_strip ndk_lib
+  host_tag="$(ls -d "$NDK/toolchains/llvm/prebuilt/"* 2>/dev/null | head -1)"
+  llvm_strip="$host_tag/bin/llvm-strip"
+  ndk_lib="$host_tag/sysroot/usr/lib"
+  for spec in "arm64-v8a:aarch64-linux-android" \
+              "armeabi-v7a:arm-linux-androideabi" \
+              "x86_64:x86_64-linux-android"; do
     abi="${spec%%:*}"
+    triple="${spec##*:}"
     build_dir="/tmp/esf-build-$abi"
     echo "==> Android $abi"
     cmake -S "$CORE" -B "$build_dir" \
       -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$abi" \
       -DANDROID_PLATFORM="android-$API" \
-      -DANDROID_STL=c++_static \
+      -DANDROID_STL=c++_shared \
       -DCMAKE_BUILD_TYPE=Release \
       -DESURFING_LTO=OFF \
       -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" >/dev/null
@@ -37,14 +43,24 @@ build_android() {
     mkdir -p "$ANDROID_OUT/$abi"
     cp "$build_dir/lib/esurfing.so" "$ANDROID_OUT/$abi/libesurfing.so"
     echo "    -> $ANDROID_OUT/$abi/libesurfing.so"
-    readelf -lW "$ANDROID_OUT/$abi/libesurfing.so" |
-      grep -q '0x4000' || echo "    警告：未检测到 16 KB 页对齐" >&2
-    # Flutter 不会打包 NDK 的 libc++_shared.so，动态链接会在 dlopen 时报
-    # 「library "libc++_shared.so" not found」，所以必须静态链（-DANDROID_STL=c++_static）。
-    if readelf -dW "$ANDROID_OUT/$abi/libesurfing.so" | grep -q 'libc++_shared'; then
-      echo "    错误：$abi 仍在动态依赖 libc++_shared.so" >&2
+
+    # Flutter 只打包 jniLibs 下的库，不会自动带上 NDK 的 libc++_shared.so；
+    # 不带就会在 dlopen("libesurfing.so") 时报 library "libc++_shared.so" not found。
+    # NDK 自带的这份是未 strip 的（约 9 MB），strip 后约 1 MB。
+    if [[ ! -f "$ndk_lib/$triple/libc++_shared.so" ]]; then
+      echo "找不到 NDK 的 libc++_shared.so：$ndk_lib/$triple" >&2
       return 1
     fi
+    "$llvm_strip" --strip-unneeded \
+      -o "$ANDROID_OUT/$abi/libc++_shared.so" \
+      "$ndk_lib/$triple/libc++_shared.so"
+    chmod 644 "$ANDROID_OUT/$abi/libc++_shared.so"
+    echo "    -> $ANDROID_OUT/$abi/libc++_shared.so ($(stat -c%s "$ANDROID_OUT/$abi/libc++_shared.so") 字节)"
+
+    readelf -lW "$ANDROID_OUT/$abi/libesurfing.so" |
+      grep -q '0x4000' || echo "    警告：未检测到 16 KB 页对齐" >&2
+    readelf -dW "$ANDROID_OUT/$abi/libesurfing.so" | grep -q 'libc++_shared' ||
+      echo "    提示：$abi 未动态依赖 libc++_shared.so（静态链接？）" >&2
   done
 }
 
