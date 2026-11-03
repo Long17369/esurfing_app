@@ -63,6 +63,13 @@ tool/build_native.sh windows
 - Windows：`packages/esurfing_native/windows/esurfing.dll`
   （CMake 在 `windows/` 构建时自动安装到 exe 同目录）
 
+> **Android 必须静态链接 C++ 运行时**（`-DANDROID_STL=c++_static`）。
+> NDK 默认用 `c++_shared`，会生成 `NEEDED libc++_shared.so`，而 Flutter 不会把
+> 这个库打进 APK，`dlopen("libesurfing.so")` 会直接失败并抛
+> `library "libc++_shared.so" not found`。静态链接后 `libesurfing.so` 只依赖
+> `libdl / libm / libc`，体积从约 450 KB 增至约 970 KB（arm64）。
+> `tool/build_native.sh` 会在构建末尾用 `readelf -d` 校验，若仍有该依赖直接报错。
+
 ## 运行与打包
 
 ```bash

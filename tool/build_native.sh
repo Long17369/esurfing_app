@@ -29,6 +29,7 @@ build_android() {
       -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
       -DANDROID_ABI="$abi" \
       -DANDROID_PLATFORM="android-$API" \
+      -DANDROID_STL=c++_static \
       -DCMAKE_BUILD_TYPE=Release \
       -DESURFING_LTO=OFF \
       -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" >/dev/null
@@ -38,6 +39,12 @@ build_android() {
     echo "    -> $ANDROID_OUT/$abi/libesurfing.so"
     readelf -lW "$ANDROID_OUT/$abi/libesurfing.so" |
       grep -q '0x4000' || echo "    警告：未检测到 16 KB 页对齐" >&2
+    # Flutter 不会打包 NDK 的 libc++_shared.so，动态链接会在 dlopen 时报
+    # 「library "libc++_shared.so" not found」，所以必须静态链（-DANDROID_STL=c++_static）。
+    if readelf -dW "$ANDROID_OUT/$abi/libesurfing.so" | grep -q 'libc++_shared'; then
+      echo "    错误：$abi 仍在动态依赖 libc++_shared.so" >&2
+      return 1
+    fi
   done
 }
 
