@@ -77,6 +77,29 @@ tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
 tool/package_android.sh    # -> dist/app-<abi>-release.apk
 ```
 
+## 应用图标
+
+图标全部由 `tool/make_icons.py` 用 Pillow 生成（渐变圆角底 + Wi-Fi 弧 + 绿色在线徽章），
+换配色或形状只需改脚本里的常量后重跑：
+
+```bash
+python3 tool/make_icons.py
+```
+
+一次性写出：
+
+| 产物 | 用途 |
+|---|---|
+| `assets/icon/app_icon.png`（1024） | 源图，用于商店/文档 |
+| `windows/runner/resources/app_icon.ico`（16–256） | Windows exe 图标 |
+| `assets/tray.ico`（16–64） | 系统托盘图标（深蓝圆底，小尺寸简化） |
+| `android/.../mipmap-*/ic_launcher.png`（48–192） | Android 旧版图标 |
+| `android/.../mipmap-*/ic_launcher_foreground.png` | 自适应图标前景（内容缩至 0.66 安全区） |
+| `android/.../drawable/ic_launcher_background.xml` | 自适应图标渐变背景 |
+| `android/.../mipmap-anydpi-v26\|v33/ic_launcher.xml` | 自适应图标（v33 带单色主题图标） |
+
+需要 `pip install pillow numpy`。
+
 ## 侧载说明
 
 - **Windows**：解压 zip 直接运行 `esurfing_app.exe`，`esurfing.dll` 必须与 exe 同目录。
