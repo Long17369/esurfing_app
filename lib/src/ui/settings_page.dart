@@ -89,7 +89,7 @@ class SettingsPage extends StatelessWidget {
               ],
               const Divider(),
               const _SectionHeader('关于'),
-              const _AboutTile(),
+              _AboutTile(nativeVersion: controller.nativeVersion),
             ],
           ),
         );
@@ -163,7 +163,9 @@ class _BatteryTileState extends State<_BatteryTile> {
 }
 
 class _AboutTile extends StatelessWidget {
-  const _AboutTile();
+  const _AboutTile({required this.nativeVersion});
+
+  final String nativeVersion;
 
   @override
   Widget build(BuildContext context) {
@@ -178,6 +180,10 @@ class _AboutTile extends StatelessWidget {
               trailing: Text(
                 info == null ? '-' : '${info.version} (${info.buildNumber})',
               ),
+            ),
+            ListTile(
+              title: const Text('原生后端'),
+              trailing: Text(nativeVersion.isEmpty ? '-' : nativeVersion),
             ),
             ListTile(
               title: const Text('平台'),

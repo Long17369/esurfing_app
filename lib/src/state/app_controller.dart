@@ -90,7 +90,8 @@ class AppController extends ChangeNotifier {
 
   bool _versionCompatible(String version) {
     if (version.isEmpty) return false;
-    // ABI 主版本必须一致；补丁号允许不同。
+    // 只校验原生库的 ABI 主版本；补丁/次版本与 App 自身版本号无关，
+    // 两边各自独立递增（见 README「版本与兼容」）。
     return version.split('.').first == '1';
   }
 

@@ -91,6 +91,23 @@ tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
 tool/package_android.sh    # -> dist/app-<abi>-release.apk
 ```
 
+## 版本与兼容
+
+App 与 `esurfing_c` **各自独立版本号**，不要求一致：
+
+| 项目 | 位置 | 当前值 |
+|---|---|---|
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.1.0+2` |
+| 原生库 ABI | `esf_version()` 返回的 `1.0.1` | 只校验主版本 |
+
+- App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
+  无需跟随原生库升级，也不要为了对齐库版本而改它。
+- `+build` 映射为 Android `versionCode` / Windows 文件版本第 4 段，
+  通过 `flutter` 自动注入；Windows 的 `Runner.rc` 已用 `FLUTTER_VERSION*` 宏，无需手改。
+- 唯一硬约束是**原生库 ABI 主版本必须匹配**（`AppController._versionCompatible`），
+  不匹配时启动即报「原生后端版本不符」，不继续登录。
+- 原生库换新版本（同主版本）直接替换二进制即可，App 不用改版本号。
+
 ## 应用图标
 
 图标全部由 `tool/make_icons.py` 用 Pillow 生成（渐变圆角底 + Wi-Fi 弧 + 绿色在线徽章），
