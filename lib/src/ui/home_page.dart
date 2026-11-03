@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../data/config_repository.dart';
 import '../ffi/esf_models.dart';
+import '../ffi/esf_types.dart';
 import '../state/app_controller.dart';
 import 'widgets/error_banner.dart';
 
@@ -66,12 +67,21 @@ class HomePage extends StatelessWidget {
                     ),
                   ),
                 )
-              else
+              else ...[
+                _ModeSelector(
+                  controller: controller,
+                  account: account,
+                  snapshot: snapshot,
+                ),
+                const SizedBox(height: 12),
                 _Actions(controller: controller, snapshot: snapshot),
+              ],
               const SizedBox(height: 16),
               _Details(
                 snapshot: snapshot,
                 account: account,
+                mode: controller.sessionMode,
+                modeOverridden: controller.hasSessionModeOverride,
                 clientId: controller.config.clientId,
               ),
               if (snapshot.phase == SessionPhase.error) ...[
@@ -222,15 +232,97 @@ class _Actions extends StatelessWidget {
   }
 }
 
+class _ModeSelector extends StatelessWidget {
+  const _ModeSelector({
+    required this.controller,
+    required this.account,
+    required this.snapshot,
+  });
+
+  final AppController controller;
+  final AccountProfile account;
+  final SessionSnapshot snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final mode = controller.sessionMode;
+    final overridden = controller.hasSessionModeOverride;
+    final accountMode = EsfMode.normalize(account.mode);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.devices),
+              title: const Text('客户端模式'),
+              subtitle: Text(overridden ? '本次登录已覆盖账号设置' : '跟随账号设置'),
+              trailing: DropdownButton<int>(
+                value: mode,
+                underline: const SizedBox.shrink(),
+                onChanged: snapshot.isBusy
+                    ? null
+                    : (value) {
+                        if (value != null) controller.setSessionMode(value);
+                      },
+                items: const [
+                  DropdownMenuItem(
+                    value: EsfMode.windows,
+                    child: Text('Windows'),
+                  ),
+                  DropdownMenuItem(
+                    value: EsfMode.android,
+                    child: Text('Android'),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      overridden
+                          ? '本次登录使用 ${EsfMode.label(mode)}；账号配置仍是 '
+                                '${EsfMode.label(accountMode)}，未被修改。'
+                          : '登录前可临时切换，只影响本次登录，不写回账号配置。',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  if (overridden)
+                    TextButton(
+                      onPressed: snapshot.isBusy
+                          ? null
+                          : controller.clearSessionMode,
+                      child: const Text('恢复账号设置'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Details extends StatelessWidget {
   const _Details({
     required this.snapshot,
     required this.account,
+    required this.mode,
     required this.clientId,
+    this.modeOverridden = false,
   });
 
   final SessionSnapshot snapshot;
   final AccountProfile? account;
+  final int mode;
+  final bool modeOverridden;
   final String clientId;
 
   @override
@@ -238,7 +330,8 @@ class _Details extends StatelessWidget {
     final rows = <(String, String)>[
       if (snapshot.ipv4.isNotEmpty) ('本机 IP', snapshot.ipv4),
       if (snapshot.mac.isNotEmpty) ('MAC', snapshot.mac),
-      if (account != null) ('模式', _modeLabel(account!.mode)),
+      if (account != null)
+        ('模式', '${_modeLabel(mode)}${modeOverridden ? '（主页覆盖）' : ''}'),
       if (account != null && account!.keepEnabled)
         ('保活间隔', '${account!.keepInterval} 秒'),
       if (clientId.isNotEmpty) ('Client-ID', clientId),
@@ -254,11 +347,7 @@ class _Details extends StatelessWidget {
     );
   }
 
-  String _modeLabel(int mode) => switch (mode) {
-    1 => 'Windows 模式',
-    2 => 'Android 模式',
-    _ => '自动',
-  };
+  String _modeLabel(int mode) => EsfMode.label(EsfMode.normalize(mode));
 }
 
 class _RecoveryHints extends StatelessWidget {

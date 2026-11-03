@@ -49,5 +49,12 @@ void main() {
       expect(restored.isOnline, isTrue);
       expect(restored.mac, snapshot.mac);
     });
+
+    test('客户端模式只暴露 Windows / Android，「自动」归一为平台默认', () {
+      expect(EsfMode.normalize(EsfMode.windows), EsfMode.windows);
+      expect(EsfMode.normalize(EsfMode.android), EsfMode.android);
+      expect(EsfMode.normalize(EsfMode.auto), EsfMode.platformDefault);
+      expect(EsfMode.normalize(99), EsfMode.platformDefault);
+    });
   });
 }

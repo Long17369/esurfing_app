@@ -44,7 +44,7 @@ class AccountsPage extends StatelessWidget {
                         [
                           account.account,
                           if (account.server.isNotEmpty) account.server,
-                          EsfMode.label(account.mode),
+                          EsfMode.label(EsfMode.normalize(account.mode)),
                           if (account.autoConnect) '自动连接',
                           if (account.keepEnabled) '保活',
                         ].join(' · '),
@@ -152,7 +152,7 @@ class _AccountEditorDialogState extends State<AccountEditorDialog> {
           ? ''
           : existing!.keepInterval.toString(),
     );
-    _mode = existing?.mode ?? EsfMode.auto;
+    _mode = EsfMode.normalize(existing?.mode ?? EsfMode.auto);
     _autoConnect = existing?.autoConnect ?? false;
     _keepEnabled = existing?.keepEnabled ?? true;
     _preTerm = existing?.preTerm ?? true;
@@ -243,9 +243,10 @@ class _AccountEditorDialogState extends State<AccountEditorDialog> {
                 const SizedBox(height: 12),
                 DropdownButtonFormField<int>(
                   initialValue: _mode,
-                  decoration: const InputDecoration(labelText: '客户端模式'),
+                  decoration: const InputDecoration(
+                    labelText: '客户端模式（登录页可临时覆盖）',
+                  ),
                   items: const [
-                    DropdownMenuItem(value: EsfMode.auto, child: Text('自动')),
                     DropdownMenuItem(
                       value: EsfMode.windows,
                       child: Text('Windows 模式'),
@@ -255,8 +256,9 @@ class _AccountEditorDialogState extends State<AccountEditorDialog> {
                       child: Text('Android 模式'),
                     ),
                   ],
-                  onChanged: (value) =>
-                      setState(() => _mode = value ?? EsfMode.auto),
+                  onChanged: (value) => setState(
+                    () => _mode = value ?? EsfMode.platformDefault,
+                  ),
                 ),
                 const SizedBox(height: 12),
                 TextFormField(

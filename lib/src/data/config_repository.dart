@@ -79,7 +79,7 @@ class AccountProfile {
     server: json['server'] as String? ?? '',
     port: (json['port'] as num?)?.toInt() ?? 0,
     mscgip: json['mscgip'] as String? ?? '',
-    mode: (json['mode'] as num?)?.toInt() ?? EsfMode.auto,
+    mode: EsfMode.normalize((json['mode'] as num?)?.toInt() ?? EsfMode.auto),
     autoConnect: json['autoConnect'] as bool? ?? false,
     keepEnabled: json['keepEnabled'] as bool? ?? true,
     keepInterval: (json['keepInterval'] as num?)?.toDouble() ?? 0,

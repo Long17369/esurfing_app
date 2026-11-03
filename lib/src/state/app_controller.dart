@@ -32,6 +32,7 @@ class AppController extends ChangeNotifier {
   String _lastError = '';
   bool _ready = false;
   bool _autoConnecting = false;
+  int? _sessionMode;
 
   AppConfig get config => _config;
   SessionSnapshot get snapshot => _snapshot;
@@ -40,6 +41,14 @@ class AppController extends ChangeNotifier {
   bool get ready => _ready;
   List<AccountProfile> get accounts => _config.accounts;
   AccountProfile? get activeAccount => _config.activeAccount;
+
+  /// 主页是否提供了本次登录的模式覆盖。
+  bool get hasSessionModeOverride => _sessionMode != null;
+
+  /// 本次登录实际使用的客户端模式：主页覆盖优先，其次账号配置。
+  int get sessionMode =>
+      _sessionMode ??
+      EsfMode.normalize(activeAccount?.mode ?? EsfMode.auto);
 
   static Future<AppController> create() async {
     final controller = AppController(
@@ -114,6 +123,10 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (_snapshot.isBusy) return;
+    if (_snapshot.isOnline) {
+      _fail('已有账号在线，请先断开再登录其它账号');
+      return;
+    }
 
     final password = await credentials.read(account.account) ?? '';
     if (password.isEmpty) {
@@ -123,7 +136,10 @@ class AppController extends ChangeNotifier {
 
     _lastError = '';
     notifyListeners();
-    logs.add('开始登录：${account.account}');
+    logs.add(
+      '开始登录：${account.account}（${EsfMode.label(sessionMode)}'
+      '${hasSessionModeOverride ? '，主页覆盖' : ''}）',
+    );
 
     try {
       final result = await _host.send(
@@ -135,7 +151,7 @@ class AppController extends ChangeNotifier {
           server: account.server,
           port: account.port,
           mscgip: account.mscgip,
-          mode: account.mode,
+          mode: sessionMode,
           mac: _config.savedMac,
           keepInterval: account.keepInterval,
           preTerm: account.preTerm,
@@ -246,7 +262,7 @@ class AppController extends ChangeNotifier {
       server: server,
       port: port,
       mscgip: mscgip,
-      mode: mode,
+      mode: EsfMode.normalize(mode),
       autoConnect: autoConnect,
       keepEnabled: keepEnabled,
       keepInterval: keepInterval,
@@ -296,6 +312,33 @@ class AppController extends ChangeNotifier {
     if (_snapshot.isOnline) await logout();
     _config = _config.copyWith(activeAccountId: id);
     await configRepository.save(_config);
+    notifyListeners();
+  }
+
+  /// 主页选择只作为「本次登录」的模式覆盖，不写回账号配置。
+  /// 优先级：主页覆盖 > 账号配置 > 平台默认。
+  Future<void> setSessionMode(int mode) async {
+    if (_snapshot.isBusy) {
+      _fail('连接进行中，请等本次操作结束后再切换客户端模式');
+      return;
+    }
+    final target = EsfMode.normalize(mode);
+    final accountMode = EsfMode.normalize(activeAccount?.mode ?? EsfMode.auto);
+    if (target == accountMode) {
+      clearSessionMode();
+      return;
+    }
+    if (_sessionMode == target) return;
+    _sessionMode = target;
+    logs.add('本次登录使用 ${EsfMode.label(target)}（不修改账号配置）');
+    notifyListeners();
+  }
+
+  /// 取消主页覆盖，回落到账号自身的客户端模式。
+  void clearSessionMode() {
+    if (_sessionMode == null) return;
+    _sessionMode = null;
+    logs.add('已回落到账号的客户端模式：${EsfMode.label(sessionMode)}');
     notifyListeners();
   }
 

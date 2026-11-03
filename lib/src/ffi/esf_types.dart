@@ -1,4 +1,5 @@
 import 'dart:ffi';
+import 'dart:io' show Platform;
 
 import 'package:ffi/ffi.dart';
 
@@ -32,6 +33,13 @@ abstract final class EsfMode {
   static const int auto = 0;
   static const int windows = 1;
   static const int android = 2;
+
+  /// UI 只暴露 Windows / Android 两种；「自动」按平台解析。
+  static int get platformDefault => Platform.isAndroid ? android : windows;
+
+  /// 把历史配置里的「自动」或非法值归一成当前平台的具体模式。
+  static int normalize(int mode) =>
+      mode == windows || mode == android ? mode : platformDefault;
 
   static String label(int mode) => switch (mode) {
     auto => '自动',
