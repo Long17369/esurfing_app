@@ -37,14 +37,23 @@ runs:
         dir="$RUNNER_TEMP/esurfing_c"
         rm -rf "$dir"
         echo "拉取 $REPO @ $REF"
-        if ! git clone --quiet --recurse-submodules --branch "$REF" "$REPO" "$dir" 2>/dev/null; then
-          if [ -z "$FALLBACK" ]; then
-            echo "::error::拉取 $REPO 的 $REF 失败：远端没有这个 tag，也没有给回退 commit"
-            exit 1
-          fi
+        log="$RUNNER_TEMP/esurfing_c_clone.log"
+        # 先按 tag / 分支直接克隆（这是发布构建该走的路）
+        if git clone --quiet --recurse-submodules --branch "$REF" "$REPO" "$dir" 2>"$log"; then
+          :
+        elif git clone --quiet --recurse-submodules "$REPO" "$dir" 2>>"$log" &&
+             git -C "$dir" checkout --quiet "$REF" 2>>"$log"; then
+          # 不是 tag 也不是分支，当 commit 检出（workflow_dispatch 手动指定时用）
+          echo "::warning::$REF 不是 tag/分支，已按 commit 检出"
+        elif [ -n "$FALLBACK" ]; then
           echo "::warning::$REF 在远端不存在，回退到 commit $FALLBACK（请给 C 库仓库补打该 tag）"
+          rm -rf "$dir"
           git clone --quiet --recurse-submodules "$REPO" "$dir"
           git -C "$dir" checkout --quiet "$FALLBACK"
+        else
+          sed -n '1,20p' "$log" >&2 || true
+          echo "::error::拉取 $REPO 的 $REF 失败：远端没有这个 tag/commit，也没有给回退 commit"
+          exit 1
         fi
         git -C "$dir" log -1 --format='实际 HEAD: %H %d %s'
         # Windows 上转成 D:/... 形式：MSYS2 的 bash 与原生 cmake.exe 都认。
