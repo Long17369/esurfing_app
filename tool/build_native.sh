@@ -9,11 +9,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE="${ESURFING_C_DIR:-$ROOT/../esurfing_c}"
 TARGET="${1:-all}"
+# 构建目录默认放 /tmp；CI（MSYS2）里必须传 Windows 形式（cygpath -m），
+# 否则 cmake.exe 写的是 C:/tmp/...，而 bash 的 cp 看的是 MSYS 的 /tmp。
+BUILD_BASE="${ESURFING_BUILD_BASE:-/tmp}"
+JOBS="$(nproc 2>/dev/null || echo 4)"
 
 ANDROID_OUT="$ROOT/android/app/src/main/jniLibs"
 WINDOWS_OUT="$ROOT/packages/esurfing_native/windows"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}/ndk/28.2.13676358}"
-API=24
+API="${ESURFING_ANDROID_API:-24}"
 
 build_android() {
   if [[ ! -f "$NDK/build/cmake/android.toolchain.cmake" ]]; then
@@ -24,7 +28,7 @@ build_android() {
   local abi build_dir
   for spec in "arm64-v8a" "armeabi-v7a" "x86_64"; do
     abi="$spec"
-    build_dir="/tmp/esf-build-$abi"
+    build_dir="$BUILD_BASE/esf-build-$abi"
     echo "==> Android $abi"
     # 不传 -DANDROID_STL：CMake 的 CMAKE_ANDROID_STL_TYPE 默认就是 c++_static，
     # 也就是 C++ 运行时静态链进 libesurfing.so，只有一个 .so、无需 libc++_shared.so。
@@ -38,7 +42,7 @@ build_android() {
       -DCMAKE_BUILD_TYPE=Release \
       -DESURFING_LTO=OFF \
       -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" >/dev/null
-    cmake --build "$build_dir" -j"$(nproc)" >/dev/null
+    cmake --build "$build_dir" -j"$JOBS" >/dev/null
     mkdir -p "$ANDROID_OUT/$abi"
     cp "$build_dir/lib/esurfing.so" "$ANDROID_OUT/$abi/libesurfing.so"
     echo "    -> $ANDROID_OUT/$abi/libesurfing.so"
@@ -62,17 +66,45 @@ build_windows() {
     echo "在 MSYS2 下执行：pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake" >&2
     return 0
   fi
-  local build_dir="/tmp/esf-build-windows"
+  local build_dir="$BUILD_BASE/esf-build-windows"
   echo "==> Windows x64"
-  cmake -S "$CORE" -B "$build_dir" \
+  # Windows 上必须显式指定生成器：
+  #   · cmake 默认挑 Visual Studio，跟 GCC 搭配直接配置失败；
+  #   · MinGW Makefiles 在 MSYS2 里又会报「sh.exe was found in your PATH」；
+  # 所以优先 Ninja（pacman -S mingw-w64-x86_64-ninja），没有才退回 MinGW Makefiles。
+  # Linux 上交叉编译不需要这些（走默认生成器）。
+  local gen=()
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+      if command -v ninja >/dev/null 2>&1; then
+        gen=(-G Ninja)
+      else
+        gen=(-G "MinGW Makefiles")
+        local make_prog
+        make_prog="$(command -v mingw32-make || true)"
+        [[ -n "$make_prog" ]] && gen+=(-DCMAKE_MAKE_PROGRAM="$make_prog")
+      fi
+      ;;
+  esac
+  cmake -S "$CORE" -B "$build_dir" "${gen[@]}" \
     -DCMAKE_SYSTEM_NAME=Windows \
     -DCMAKE_C_COMPILER="$cc" \
     -DCMAKE_CXX_COMPILER="$cxx" \
     -DCMAKE_BUILD_TYPE=Release \
     -DESURFING_LTO=OFF >/dev/null
-  cmake --build "$build_dir" -j"$(nproc)" >/dev/null
+  cmake --build "$build_dir" -j"$JOBS" >/dev/null
   mkdir -p "$WINDOWS_OUT"
-  cp "$build_dir/lib/esurfing.dll" "$WINDOWS_OUT/esurfing.dll"
+  # Windows 的 DLL 是 RUNTIME 产物，capi/CMakeLists.txt 把它放在 build/bin；
+  # Linux 的 .so 才是 LIBRARY 产物，放在 build/lib。两个都找一遍。
+  local dll=""
+  for candidate in "$build_dir/bin/esurfing.dll" "$build_dir/lib/esurfing.dll"; do
+    if [[ -f "$candidate" ]]; then dll="$candidate"; break; fi
+  done
+  if [[ -z "$dll" ]]; then
+    echo "找不到 esurfing.dll（看过 $build_dir/bin 与 $build_dir/lib）" >&2
+    return 1
+  fi
+  cp "$dll" "$WINDOWS_OUT/esurfing.dll"
   echo "    -> $WINDOWS_OUT/esurfing.dll"
 }
 

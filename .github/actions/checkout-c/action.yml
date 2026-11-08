@@ -1,0 +1,80 @@
+name: checkout esurfing_c
+description: >-
+  按固定版本拉取 esurfing_c 源码（含子模块），并校验源码里的版本号与 ref 一致。
+  源码地址来自环境变量 / 输入，方便换 fork 或私有镜像。
+
+inputs:
+  repo:
+    description: esurfing_c 的 git 地址（可用带 token 的 https 地址）
+    required: true
+  ref:
+    description: 绑定的版本，必须是 tag（如 v1.2.1）
+    required: true
+  fallback-sha:
+    description: 远端还没有该 tag 时退回的 commit（留空则不回退，直接失败）
+    required: false
+    default: ''
+
+outputs:
+  dir:
+    description: 源码目录（已转成当前 runner 能用的形式）
+    value: ${{ steps.clone.outputs.dir }}
+  version:
+    description: CMakeLists.txt 里 project(... VERSION ...) 的版本号
+    value: ${{ steps.verify.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: clone
+      shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+        REF: ${{ inputs.ref }}
+        FALLBACK: ${{ inputs.fallback-sha }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/esurfing_c"
+        rm -rf "$dir"
+        echo "拉取 $REPO @ $REF"
+        if ! git clone --quiet --recurse-submodules --branch "$REF" "$REPO" "$dir" 2>/dev/null; then
+          if [ -z "$FALLBACK" ]; then
+            echo "::error::拉取 $REPO 的 $REF 失败：远端没有这个 tag，也没有给回退 commit"
+            exit 1
+          fi
+          echo "::warning::$REF 在远端不存在，回退到 commit $FALLBACK（请给 C 库仓库补打该 tag）"
+          git clone --quiet --recurse-submodules "$REPO" "$dir"
+          git -C "$dir" checkout --quiet "$FALLBACK"
+        fi
+        git -C "$dir" log -1 --format='实际 HEAD: %H %d %s'
+        # Windows 上转成 D:/... 形式：MSYS2 的 bash 与原生 cmake.exe 都认。
+        if command -v cygpath >/dev/null 2>&1; then
+          dir_env="$(cygpath -m "$dir")"
+        else
+          dir_env="$dir"
+        fi
+        echo "ESURFING_C_DIR=$dir_env" >> "$GITHUB_ENV"
+        echo "dir=$dir_env" >> "$GITHUB_OUTPUT"
+
+    - id: verify
+      shell: bash
+      env:
+        REF: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+        # 版本号只有一处定义：根 CMakeLists.txt 的 project(... VERSION x.y.z)
+        version="$(awk '/^project\(/{f=1;next} f&&/VERSION/{print $2; exit}' "$ESURFING_C_DIR/CMakeLists.txt")"
+        echo "源码版本: $version"
+        case "$REF" in
+          v*)
+            if [ "v$version" != "$REF" ]; then
+              echo "::error::绑定的 ref（$REF）与源码版本（$version）不一致，检查 ESURFING_C_REF"
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::warning::ref 不是 tag（$REF），无法校验版本；发布构建请改成 tag"
+            ;;
+        esac
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "ESURFING_C_VERSION=$version" >> "$GITHUB_ENV"

@@ -1,0 +1,237 @@
+name: build
+
+# 触发：
+#   · push dev/main —— 每次提交都验证 Windows 与 Android 能编过
+#   · push tag v*   —— 额外把产物挂到 GitHub Release
+#   · PR / 手动
+on:
+  push:
+    branches: [dev, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      c_ref:
+        description: '临时指定 esurfing_c 的 tag / commit（留空用仓库变量或默认值）'
+        required: false
+
+# Release 需要写权限；其余 job 只读。
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.7'
+
+  # 注意：C 库源码地址 = 环境变量 ESURFING_C_REPO（见各 job 的 checkout 步骤），
+  #   `secrets` 上下文在 workflow 级 env 里不可用，所以它写在步骤上：
+  #   优先 Secret（私有库放带 token 的 https 地址）> 仓库变量 > 同 owner 下的 esurfing_c
+
+  # ── 绑定的 C 库版本：**必须是 tag**。升级 C 库时只改这一处（或改仓库变量）。
+  #    checkout-c 动作会校验它和 CMakeLists.txt 里的 project(... VERSION ...) 一致。
+  #    当前 App 内置的 jniLibs / DLL 都来自 esurfing_c v1.2.1。
+  ESURFING_C_REF: ${{ github.event.inputs.c_ref || vars.ESURFING_C_REF || 'v1.2.1' }}
+
+  # 万一远端还没打 v1.2.1 这个 tag，就退回 v1.2.1 对应的 commit（c5a7582）。
+  # 远端补好 tag 后可以删掉这一行，让「tag 不存在」直接失败。
+  ESURFING_C_FALLBACK_SHA: c5a7582
+
+jobs:
+  # ── 静态检查与单测（纯 Dart，跑一份就够）
+  check:
+    name: analyze & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test --reporter expanded
+
+      # tag 是发布契约：v<App 版本>，版本号只认 pubspec.yaml（+build 不参与）
+      - name: 校验 tag 与 pubspec 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^version: *//p' pubspec.yaml)"
+          want="v${version%%+*}"
+          echo "pubspec=$version tag=$GITHUB_REF_NAME"
+          if [ "$want" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME 与 pubspec 版本（$want）不一致"
+            exit 1
+          fi
+
+  # ── Windows x64：MinGW 编 esurfing.dll → 放进 packages/esurfing_native/windows/ → 打 Flutter 包
+  windows:
+    name: windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取 esurfing_c（绑定版本）
+        uses: ./.github/actions/checkout-c
+        with:
+          repo: ${{ secrets.ESURFING_C_REPO || vars.ESURFING_C_REPO || format('https://github.com/{0}/esurfing_c.git', github.repository_owner) }}
+          ref: ${{ env.ESURFING_C_REF }}
+          fallback-sha: ${{ env.ESURFING_C_FALLBACK_SHA }}
+
+      # esurfing_c 是 C++23 + MinGW 专用链接参数（-static / --gc-sections），
+      # 不能拿 MSVC 编，所以这里用 MSYS2 的 mingw-w64 工具链。
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-ninja
+
+      - name: 构建 esurfing.dll
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          # /tmp 在 MSYS2 里是 C:\msys64\tmp，而 cmake.exe 是原生程序 ——
+          # 构建目录必须用 cygpath -m 的 C:/... 形式，bash 和 cmake 才看到同一个目录。
+          export ESURFING_BUILD_BASE="$(cygpath -m "$RUNNER_TEMP")/esf-build"
+          bash tool/build_native.sh windows
+          ls -l packages/esurfing_native/windows/
+          # 版本字符串编在库里，编错版本会在这里暴露
+          strings -a packages/esurfing_native/windows/esurfing.dll |
+            grep -F "$ESURFING_C_VERSION" >/dev/null ||
+            { echo "::error::esurfing.dll 里找不到版本 $ESURFING_C_VERSION"; exit 1; }
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 构建 Windows 包
+        run: |
+          flutter pub get
+          flutter build windows --release
+
+      - name: 校验产物
+        shell: pwsh
+        run: |
+          $out = 'build\windows\x64\runner\Release'
+          if (!(Test-Path "$out\esurfing_app.exe")) { throw "缺少 esurfing_app.exe" }
+          # 原生库必须跟 exe 放一起，否则运行时会 dlopen 失败
+          if (!(Test-Path "$out\esurfing.dll")) { throw "缺少 esurfing.dll（windows/CMakeLists.txt 没装进去）" }
+          $dll = Get-Item "$out\esurfing.dll"
+          Write-Host "esurfing.dll $($dll.Length) 字节"
+          $version = (Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$').Matches.Groups[1].Value
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $zip = "dist\esurfing-app-windows-x64-$version.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath $zip -Force
+          Write-Host "产物: $zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ── Android：用同一个 C 库版本重编三个 ABI 的 so，再打 APK
+  android:
+    name: android apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: '28.2.13676358'
+      ESURFING_ANDROID_API: '24'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取 esurfing_c（绑定版本）
+        uses: ./.github/actions/checkout-c
+        with:
+          repo: ${{ secrets.ESURFING_C_REPO || vars.ESURFING_C_REPO || format('https://github.com/{0}/esurfing_c.git', github.repository_owner) }}
+          ref: ${{ env.ESURFING_C_REF }}
+          fallback-sha: ${{ env.ESURFING_C_FALLBACK_SHA }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK / SDK 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: 构建三个 ABI 的 libesurfing.so
+        run: |
+          bash tool/build_native.sh android
+          # 构建产物与仓库里提交的 so 应当来自同一版 C 库；不一致只告警，不挡构建
+          if ! git diff --quiet -- android/app/src/main/jniLibs; then
+            echo "::warning::重编的 jniLibs 与仓库中的不一致（工具链差异或 C 库版本没同步），记得比对后提交"
+            git --no-pager diff --stat -- android/app/src/main/jniLibs
+          fi
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 构建 APK
+        run: |
+          flutter pub get
+          flutter build apk --release
+
+      - name: 校验产物
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          ls -l "$apk"
+          aapt=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | tail -1)
+          "$aapt" dump badging "$apk" | grep -E '^(package|application-label:)' | head -1
+          version="$(sed -n 's/^version: *//p' pubspec.yaml)"
+          mkdir -p dist
+          cp "$apk" "dist/esurfing-app-android-$version.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  # ── 打 tag 时把两个产物挂到 Release（Windows zip + APK）
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --notes "App $TAG / 原生库 esurfing_c ${{ env.ESURFING_C_REF }}" \
+              --generate-notes
+          fi
