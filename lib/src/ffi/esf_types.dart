@@ -112,6 +112,20 @@ typedef EsfEventCbDart = void Function(
   Pointer<Utf8> text,
 );
 
+/// v1.2.0 起：`esf_set_owned_event_cb` 的事件回调，text 的所有权转移给宿主
+/// （读完用 `esf_free` 释放），异步宿主（Dart 的 NativeCallable.listener）
+/// 才能在回调返回之后安全读取。
+typedef EsfOwnedEventCbNative = Void Function(
+  Pointer<Void> user,
+  Int32 event,
+  Pointer<Utf8> text,
+);
+typedef EsfOwnedEventCbDart = void Function(
+  Pointer<Void> user,
+  int event,
+  Pointer<Utf8> text,
+);
+
 typedef EsfAskCbNative = Pointer<Utf8> Function(
   Pointer<Void> user,
   Pointer<Utf8> prompt,
@@ -139,6 +153,17 @@ typedef EsfSetCallbacksNative = Void Function(
 typedef EsfSetCallbacksDart = void Function(
   Pointer<EsfClient> client,
   Pointer<EsfCallbacks> callbacks,
+);
+
+typedef EsfSetOwnedEventCbNative = Void Function(
+  Pointer<EsfClient> client,
+  Pointer<NativeFunction<EsfOwnedEventCbNative>> cb,
+  Pointer<Void> user,
+);
+typedef EsfSetOwnedEventCbDart = void Function(
+  Pointer<EsfClient> client,
+  Pointer<NativeFunction<EsfOwnedEventCbNative>> cb,
+  Pointer<Void> user,
 );
 
 typedef EsfModeOfNative = Int32 Function(Pointer<EsfClient> client);

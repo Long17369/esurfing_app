@@ -18,6 +18,9 @@ class AccountProfile {
     this.keepEnabled = true,
     this.keepInterval = 0,
     this.preTerm = true,
+    this.wifiSsid = '',
+    this.wifiAutoLogin = false,
+    this.wifiConnectOnLogin = true,
   });
 
   final String id;
@@ -32,6 +35,18 @@ class AccountProfile {
   final double keepInterval;
   final bool preTerm;
 
+  /// 目标 Wi-Fi 的 SSID（实验性功能）；空字符串表示不管理 Wi-Fi。
+  final String wifiSsid;
+
+  /// 发现已连上 [wifiSsid] 且当前没有会话时，自动登录。
+  final bool wifiAutoLogin;
+
+  /// 点「登录」时若还没连上 [wifiSsid]，先唤起系统 Wi-Fi 面板并等待连上再登录。
+  final bool wifiConnectOnLogin;
+
+  /// 该账号是否启用了 Wi-Fi 联动。
+  bool get wifiEnabled => wifiSsid.trim().isNotEmpty;
+
   String get title => displayName.isEmpty ? account : displayName;
 
   AccountProfile copyWith({
@@ -44,6 +59,9 @@ class AccountProfile {
     bool? keepEnabled,
     double? keepInterval,
     bool? preTerm,
+    String? wifiSsid,
+    bool? wifiAutoLogin,
+    bool? wifiConnectOnLogin,
   }) => AccountProfile(
     id: id,
     account: account,
@@ -56,6 +74,9 @@ class AccountProfile {
     keepEnabled: keepEnabled ?? this.keepEnabled,
     keepInterval: keepInterval ?? this.keepInterval,
     preTerm: preTerm ?? this.preTerm,
+    wifiSsid: wifiSsid ?? this.wifiSsid,
+    wifiAutoLogin: wifiAutoLogin ?? this.wifiAutoLogin,
+    wifiConnectOnLogin: wifiConnectOnLogin ?? this.wifiConnectOnLogin,
   );
 
   Map<String, Object?> toJson() => {
@@ -70,6 +91,9 @@ class AccountProfile {
     'keepEnabled': keepEnabled,
     'keepInterval': keepInterval,
     'preTerm': preTerm,
+    'wifiSsid': wifiSsid,
+    'wifiAutoLogin': wifiAutoLogin,
+    'wifiConnectOnLogin': wifiConnectOnLogin,
   };
 
   factory AccountProfile.fromJson(Map<String, Object?> json) => AccountProfile(
@@ -84,6 +108,9 @@ class AccountProfile {
     keepEnabled: json['keepEnabled'] as bool? ?? true,
     keepInterval: (json['keepInterval'] as num?)?.toDouble() ?? 0,
     preTerm: json['preTerm'] as bool? ?? true,
+    wifiSsid: json['wifiSsid'] as String? ?? '',
+    wifiAutoLogin: json['wifiAutoLogin'] as bool? ?? false,
+    wifiConnectOnLogin: json['wifiConnectOnLogin'] as bool? ?? true,
   );
 }
 
@@ -94,6 +121,7 @@ class UiConfig {
     this.autoStart = false,
     this.logoutOnExit = false,
     this.notifications = true,
+    this.logLevel = 'info',
   });
 
   final bool startMinimized;
@@ -102,18 +130,23 @@ class UiConfig {
   final bool logoutOnExit;
   final bool notifications;
 
+  /// 日志页的显示级别下限（debug / info / warn / error），默认 info。
+  final String logLevel;
+
   UiConfig copyWith({
     bool? startMinimized,
     bool? closeToTray,
     bool? autoStart,
     bool? logoutOnExit,
     bool? notifications,
+    String? logLevel,
   }) => UiConfig(
     startMinimized: startMinimized ?? this.startMinimized,
     closeToTray: closeToTray ?? this.closeToTray,
     autoStart: autoStart ?? this.autoStart,
     logoutOnExit: logoutOnExit ?? this.logoutOnExit,
     notifications: notifications ?? this.notifications,
+    logLevel: logLevel ?? this.logLevel,
   );
 
   Map<String, Object?> toJson() => {
@@ -122,6 +155,7 @@ class UiConfig {
     'autoStart': autoStart,
     'logoutOnExit': logoutOnExit,
     'notifications': notifications,
+    'logLevel': logLevel,
   };
 
   factory UiConfig.fromJson(Map<String, Object?> json) => UiConfig(
@@ -130,6 +164,7 @@ class UiConfig {
     autoStart: json['autoStart'] as bool? ?? false,
     logoutOnExit: json['logoutOnExit'] as bool? ?? false,
     notifications: json['notifications'] as bool? ?? true,
+    logLevel: json['logLevel'] as String? ?? 'info',
   );
 }
 

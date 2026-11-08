@@ -1,9 +1,12 @@
 package com.esurfing.esurfing_app
 
+import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
@@ -58,6 +61,15 @@ class EsurfingApplication : android.app.Application() {
                         requestIgnoreBatteryOptimizations()
                         result.success(null)
                     }
+                    "wifiStatus" -> result.success(wifiStatus())
+                    "requestWifiPermission" -> {
+                        requestWifiPermission()
+                        result.success(hasWifiPermission())
+                    }
+                    "openWifiPanel" -> {
+                        openWifiPanel()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -101,8 +113,104 @@ class EsurfingApplication : android.app.Application() {
         }
     }
 
+    /**
+     * 读当前 Wi-Fi 状态。Android 10+ 不允许 App 开关 Wi-Fi，也不允许静默连接，
+     * 所以只提供「当前 SSID / 射频状态 / 权限状态」，连接一律交给系统。
+     */
+    private fun wifiStatus(): Map<String, Any?> {
+        val manager = applicationContext
+            .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            ?: return mapOf("supported" to false)
+        val enabled = try {
+            manager.isWifiEnabled
+        } catch (_: Exception) {
+            false
+        }
+        val granted = hasWifiPermission()
+        var ssid = ""
+        if (granted) {
+            ssid = try {
+                @Suppress("DEPRECATION")
+                manager.connectionInfo?.ssid ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+            ssid = ssid.trim().removeSurrounding("\"")
+            // 没权限 / 没连上时系统会返回 <unknown ssid> 或一串 0。
+            if (ssid == "<unknown ssid>" || ssid == "0x" ||
+                ssid == "02:00:00:00:00:00" || ssid.startsWith("0x0")
+            ) {
+                ssid = ""
+            }
+        }
+        return mapOf(
+            "supported" to true,
+            "enabled" to enabled,
+            "ssid" to ssid,
+            "permissionGranted" to granted
+        )
+    }
+
+    private fun hasWifiPermission(): Boolean {
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        return permissions.any {
+            checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun requestWifiPermission() {
+        val activity = activityRef?.get() ?: return
+        if (hasWifiPermission()) return
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        activity.requestPermissions(permissions, WIFI_REQUEST)
+    }
+
+    /** Android 10+ 无法直接开关 Wi-Fi，只能唤起系统面板让用户操作。 */
+    private fun openWifiPanel() {
+        val manager = applicationContext
+            .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        // Android 9 及以下还能直接打开射频，顺手打开省一步。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && manager != null) {
+            try {
+                if (!manager.isWifiEnabled) {
+                    @Suppress("DEPRECATION")
+                    manager.isWifiEnabled = true
+                }
+            } catch (_: Exception) {
+                // 忽略：下面还会打开系统面板。
+            }
+        }
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Intent(Settings.Panel.ACTION_WIFI)
+        } else {
+            Intent(Settings.ACTION_WIFI_SETTINGS)
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val host = activityRef?.get() ?: this
+        try {
+            host.startActivity(intent)
+        } catch (_: Exception) {
+            // 打不开就算了，UI 会提示手动连接。
+        }
+    }
+
     companion object {
         private const val CHANNEL = "esurfing/android"
         private const val NOTIFICATION_REQUEST = 1001
+        private const val WIFI_REQUEST = 1002
     }
 }

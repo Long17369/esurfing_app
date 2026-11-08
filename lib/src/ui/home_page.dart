@@ -68,6 +68,10 @@ class HomePage extends StatelessWidget {
                   ),
                 )
               else ...[
+                if (account.wifiEnabled && controller.wifiSupported) ...[
+                  _WifiCard(controller: controller, account: account),
+                  const SizedBox(height: 12),
+                ],
                 _ModeSelector(
                   controller: controller,
                   account: account,
@@ -201,9 +205,21 @@ class _Actions extends StatelessWidget {
                   ? null
                   : online
                   ? controller.logout
-                  : controller.login,
-              icon: Icon(online ? Icons.link_off : Icons.login),
-              label: Text(online ? '断开连接' : '登录'),
+                  : controller.loginWithWifi,
+              icon: Icon(
+                online
+                    ? Icons.link_off
+                    : controller.waitingForWifi
+                    ? Icons.wifi_find
+                    : Icons.login,
+              ),
+              label: Text(
+                online
+                    ? '断开连接'
+                    : controller.waitingForWifi
+                    ? '等待 Wi-Fi…'
+                    : '登录',
+              ),
             ),
             OutlinedButton.icon(
               onPressed: !online || snapshot.isBusy
@@ -232,6 +248,77 @@ class _Actions extends StatelessWidget {
   }
 }
 
+/// Wi-Fi 联动状态卡（实验性，仅 Android）。
+class _WifiCard extends StatelessWidget {
+  const _WifiCard({required this.controller, required this.account});
+
+  final AppController controller;
+  final AccountProfile account;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final target = account.wifiSsid.trim();
+    final current = controller.currentSsid;
+    final matched = current == target;
+    final color = matched ? Colors.green : scheme.outline;
+    final subtitle = () {
+      if (!controller.wifi.permissionGranted) {
+        return '未授权读取 Wi-Fi 名称，请在设置里授予「附近的设备 / 位置信息」权限。';
+      }
+      if (!controller.wifi.enabled) return 'Wi-Fi 已关闭，请先打开 Wi-Fi。';
+      if (current.isEmpty) return '当前未连接 Wi-Fi。';
+      return matched ? '已连上目标 Wi-Fi，可以登录。' : '当前在 $current，不是目标 Wi-Fi。';
+    }();
+
+    return Card(
+      child: Column(
+        children: [
+          ListTile(
+            leading: Icon(
+              matched ? Icons.wifi : Icons.wifi_off,
+              color: color,
+            ),
+            title: Text('Wi-Fi：$target'),
+            subtitle: Text(subtitle),
+            trailing: TextButton(
+              onPressed: () async {
+                await controller.requestWifiPermission();
+                await controller.probeWifiSsid();
+              },
+              child: const Text('刷新'),
+            ),
+          ),
+          if (controller.waitingForWifi)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      '等待连接 ${controller.waitingForWifiSsid}…连上后会自动登录',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: controller.cancelWaitingForWifi,
+                    child: const Text('取消'),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ModeSelector extends StatelessWidget {
   const _ModeSelector({
     required this.controller,
@@ -248,6 +335,7 @@ class _ModeSelector extends StatelessWidget {
     final mode = controller.sessionMode;
     final overridden = controller.hasSessionModeOverride;
     final accountMode = EsfMode.normalize(account.mode);
+    final locked = controller.hasLockedSession;
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 8, 8, 12),
@@ -258,11 +346,17 @@ class _ModeSelector extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.devices),
               title: const Text('客户端模式'),
-              subtitle: Text(overridden ? '本次登录已覆盖账号设置' : '跟随账号设置'),
+              subtitle: Text(
+                locked
+                    ? '连接中/已连接，先断开才能修改'
+                    : overridden
+                    ? '本次登录已覆盖账号设置'
+                    : '跟随账号设置',
+              ),
               trailing: DropdownButton<int>(
                 value: mode,
                 underline: const SizedBox.shrink(),
-                onChanged: snapshot.isBusy
+                onChanged: locked
                     ? null
                     : (value) {
                         if (value != null) controller.setSessionMode(value);
@@ -286,18 +380,18 @@ class _ModeSelector extends StatelessWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      overridden
+                      locked
+                          ? '本次会话使用 ${EsfMode.label(mode)}，断开后才能切换。'
+                          : overridden
                           ? '本次登录使用 ${EsfMode.label(mode)}；账号配置仍是 '
                                 '${EsfMode.label(accountMode)}，未被修改。'
                           : '登录前可临时切换，只影响本次登录，不写回账号配置。',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),
-                  if (overridden)
+                  if (overridden && !locked)
                     TextButton(
-                      onPressed: snapshot.isBusy
-                          ? null
-                          : controller.clearSessionMode,
+                      onPressed: controller.clearSessionMode,
                       child: const Text('恢复账号设置'),
                     ),
                 ],
@@ -333,7 +427,9 @@ class _Details extends StatelessWidget {
       if (account != null)
         ('模式', '${_modeLabel(mode)}${modeOverridden ? '（主页覆盖）' : ''}'),
       if (account != null && account!.keepEnabled)
-        ('保活间隔', '${account!.keepInterval} 秒'),
+        ('保活间隔', AppController.keepIntervalLabel(account!.keepInterval)),
+      if (account != null && account!.wifiEnabled)
+        ('目标 Wi-Fi', account!.wifiSsid),
       if (clientId.isNotEmpty) ('Client-ID', clientId),
     ];
     if (rows.isEmpty) return const SizedBox.shrink();

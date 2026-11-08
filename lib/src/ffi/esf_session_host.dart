@@ -6,6 +6,7 @@ import 'package:ffi/ffi.dart';
 import 'esf_bindings.dart';
 import 'esf_models.dart';
 import 'esf_types.dart';
+import 'native_text.dart';
 
 /// 后台会话宿主。UI isolate 只发命令，所有阻塞的 `esf_*` 调用都在这里串行执行。
 void sessionHostMain(List<Object?> args) {
@@ -22,8 +23,11 @@ class _SessionHost {
   EsfBindings? _bindings;
   Pointer<EsfClient>? _client;
   NativeCallable<EsfEventCbNative>? _eventCallable;
+  NativeCallable<EsfOwnedEventCbNative>? _ownedEventCallable;
   bool _online = false;
   String _lastMac = '';
+  /// 本次会话的保活节奏（秒）。只从 connect 参数来，不看全局配置。
+  double _keepInterval = 0;
 
   void start() {
     _ui.send(_rx.sendPort);
@@ -73,6 +77,8 @@ class _SessionHost {
         _disconnect();
         _eventCallable?.close();
         _eventCallable = null;
+        _ownedEventCallable?.close();
+        _ownedEventCallable = null;
         return const {};
       default:
         throw StateError('未知命令：$type');
@@ -92,6 +98,7 @@ class _SessionHost {
     }
     _client = client;
     _installCallbacks(client);
+    _keepInterval = params.keepInterval;
 
     final options = _makeOptions(preTerm: params.preTerm, keep: -1);
     final codeOut = calloc<Pointer<Utf8>>();
@@ -239,28 +246,67 @@ class _SessionHost {
     _b.optionsInit(options);
     options.ref.preTerm = preTerm ? 1 : 0;
     options.ref.keep = keep;
+    // 0 表示让核心用自己的内置默认值（10s），所以只在用户给了正数时覆盖。
+    if (_keepInterval > 0) {
+      options.ref.keepInterval = _keepInterval;
+    }
     return options;
   }
 
   void _installCallbacks(Pointer<EsfClient> client) {
-    _eventCallable ??= NativeCallable<EsfEventCbNative>.listener(
-      _onNativeEvent,
-    );
+    // v1.2.0 起优先用「所有权转移」版：text 由原生库 malloc，宿主读完
+    // esf_free。这样 NativeCallable.listener 的异步投递才不会读到悬空指针。
+    final setOwned = _b.setOwnedEventCb;
+    if (setOwned != null) {
+      _ownedEventCallable ??= NativeCallable<EsfOwnedEventCbNative>.listener(
+        _onOwnedNativeEvent,
+      );
+    } else {
+      // 旧库回退：text 仅在回调期间有效，只能尽量容错地读。
+      _eventCallable ??= NativeCallable<EsfEventCbNative>.listener(
+        _onNativeEvent,
+      );
+    }
+
     final callbacks = calloc<EsfCallbacks>();
     try {
       callbacks.ref.user = nullptr;
-      callbacks.ref.onEvent = _eventCallable!.nativeFunction;
+      callbacks.ref.onEvent = setOwned != null
+          ? nullptr
+          : _eventCallable!.nativeFunction;
       callbacks.ref.onAsk = nullptr;
       callbacks.ref.onCancel = nullptr;
       _b.setCallbacks(client, callbacks);
     } finally {
       calloc.free(callbacks);
     }
+
+    if (setOwned != null) {
+      setOwned(client, _ownedEventCallable!.nativeFunction, nullptr);
+    }
+  }
+
+  void _onOwnedNativeEvent(Pointer<Void> user, int kind, Pointer<Utf8> text) {
+    try {
+      _ui.send({
+        'type': 'event',
+        'kind': kind,
+        'text': decodeNativeUtf8(text),
+      });
+    } finally {
+      // 所有权在宿主这边，漏了就是每条事件泄漏一次。
+      _b.free(text);
+    }
   }
 
   void _onNativeEvent(Pointer<Void> user, int kind, Pointer<Utf8> text) {
-    final message = text == nullptr ? '' : text.toDartString();
-    _ui.send({'type': 'event', 'kind': kind, 'text': message});
+    // 旧契约（< 1.2.0）：text 只在回调期间有效，而 NativeCallable.listener
+    // 是异步投递，读取时必须容错（详见 decodeNativeUtf8 的注释）。
+    _ui.send({
+      'type': 'event',
+      'kind': kind,
+      'text': decodeNativeUtf8(text),
+    });
   }
 
   void _check(int rc, String action) {

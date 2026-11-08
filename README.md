@@ -14,11 +14,18 @@
   - 主页（登录页）可临时覆盖，优先级高于账号配置，**只对本次登录生效，不写回配置文件**；
   - 主页可点「恢复账号设置」回到账号模式；
   - 同一时刻只允许一个账号在线，已在线时需先断开再登录其它账号
-- 保活（默认永久保活，登录后自动启动）
-- 多账号档案、单活动会话、切换账号
+- 保活（默认永久保活，登录后自动启动）；保活间隔按账号配置，
+  留空/0 表示用核心内置默认 10 秒（`esf_options.keep_interval`）
+- 多账号档案、单活动会话、切换账号；账号编辑是独立页面
+- 在线锁定：连接中/已连接/保活中时，当前账号的配置与客户端模式不可修改，
+  需先在主页断开；已连接时切换账号会先弹确认再断开
 - Windows：托盘常驻、关闭到托盘、开机自启、启动最小化、单实例
 - Android：前台服务常驻通知、开机自启、电池优化白名单引导
-- 日志页（最近 500 条 + 文件轮转）
+- 日志页：显示级别可选（DEBUG / INFO / WARN / ERROR，默认 INFO 且持久化在
+  `ui.logLevel`），可复制当前级别，也可一键导出完整历史日志（含轮转文件）
+- Wi-Fi 联动（**实验性，仅 Android**）：每个账号可绑定一个目标 Wi-Fi，
+  发现连上该 Wi-Fi 就自动登录；点「登录」时若还没连上，会唤起系统 Wi-Fi 面板，
+  连上后自动继续登录
 
 ## 目录
 
@@ -102,8 +109,8 @@ App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.1.0+2` |
-| 原生库 ABI | `esf_version()` 返回的 `1.0.1` | 只校验主版本 |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.3.0+7` |
+| 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 只校验主版本 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
   无需跟随原生库升级，也不要为了对齐库版本而改它。
@@ -112,6 +119,14 @@ App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 - 唯一硬约束是**原生库 ABI 主版本必须匹配**（`AppController._versionCompatible`），
   不匹配时启动即报「原生后端版本不符」，不继续登录。
 - 原生库换新版本（同主版本）直接替换二进制即可，App 不用改版本号。
+- **原生库请用 `esurfing_c` v1.2.1 及以上**：1.2.0 及更早版本在「配置里存了上次成功的
+  MAC、但默认路由指向另一块网卡」的场景下，会用默认路由的 IPv4 配保存的 MAC 发报文，
+  服务端按 (IP, MAC) 匹配不上，直接返回 `Error-Code = 102`（表现为「已有在线会话」
+  却怎么也登不上）。App 侧对此无解，只能换原生库。
+- 事件回调优先使用 `esf_set_owned_event_cb`（v1.2.0 起，文本所有权转移给宿主，
+  读完 `esf_free`）—— Dart 的 `NativeCallable.listener` 是异步投递，旧的
+  `on_event` 约定「text 只在回调期间有效」会读到悬空指针。运行时探测不到该符号时
+  自动回退到旧的 `on_event`，并用容错解码（`decodeNativeUtf8`）兜底。
 
 ## 应用图标
 
@@ -136,6 +151,51 @@ python3 tool/make_icons.py
 
 需要 `pip install pillow numpy`。
 
+## Wi-Fi 联动（实验性）
+
+按**账号**绑定，不是全局设置：`config.json` 的 `accounts[].wifiSsid` /
+`wifiAutoLogin` / `wifiConnectOnLogin`。
+
+| 字段 | 含义 |
+|---|---|
+| `wifiSsid` | 目标 Wi-Fi 的 SSID；留空表示该账号不管理 Wi-Fi |
+| `wifiAutoLogin` | 发现刚连上该 Wi-Fi 且当前没有会话时，自动登录 |
+| `wifiConnectOnLogin` | 点「登录」时若还没连上，先唤起系统 Wi-Fi 面板，连上后自动继续 |
+
+**平台事实（决定了实现边界）**
+
+- **Android 10+**：App 既不能直接开关 Wi-Fi（`setWifiEnabled` 已废弃且返回 false），
+  也不能静默连接任意 SSID（`addNetwork` + `enableNetwork` 需要系统权限）。
+  所以只能「读当前 SSID」+「唤起系统 Wi-Fi 面板」+「检测到连上后继续登录」，
+  真正的连接由系统自动连接或用户点一下完成。Android 9 及以下会顺手把 Wi-Fi 打开。
+- **Windows**：本期不实现（`netsh wlan` 要建配置文件、还要处理 GBK 输出），
+  设置页会显示「未实现」，账号编辑页的 Wi-Fi 区块置灰。
+
+**权限（Android）**：`ACCESS_WIFI_STATE`、`CHANGE_WIFI_STATE`，读取 SSID 还需要
+`NEARBY_WIFI_DEVICES`（13+）或 `ACCESS_FINE_LOCATION`（12 及以下，13+ 也一并申请作兜底）。
+首次使用请在设置页点「授权」。
+
+**票据保护**（容易踩的坑）
+
+- 一个 Wi-Fi 连接周期**只自动登录一次**，不会反复 login。重复 `esf_login` 会先
+  `term` 掉服务端会话再重新取票，票据作废后保活会连环失败。
+- 已有会话时连上目标 Wi-Fi **什么都不做**，沿用现有票据；
+  断网重连的恢复交给核心保活线程自己退避重试（`keep_retry*`）。
+- 目标 Wi-Fi 断开时**不会**自动登出、也不会停止保活，会话与票据原样保留，
+  只写一条日志。
+
+## 日志
+
+- 文件：应用支持目录下的 `logs/app.log`，超过 2 MB 轮转，保留 `app.log.1`–`app.log.5`。
+- 内存里保留最近 2000 条，供日志页实时查看。
+- 日志页默认只显示 **INFO** 及以上级别；切换级别会写入配置（`ui.logLevel`），
+  重启后保持。
+- 级别只影响**展示**：文件和导出始终包含全部级别（含 DEBUG），方便排障。
+- 「导出」把 `app.log.5 → app.log` 全部合并写成一个文件：
+  - Windows：`<下载目录>/esurfing/esurfing-log-<时间>.log`
+  - Android：`Android/data/<包名>/files/logs/esurfing-log-<时间>.log`
+  - 找不到上述目录时回落到应用支持目录的 `exports/`；导出后弹窗显示完整路径，可复制。
+
 ## 侧载说明
 
 - **Windows**：解压 zip 直接运行 `esurfing_app.exe`，`esurfing.dll` 必须与 exe 同目录。
@@ -151,5 +211,7 @@ python3 tool/make_icons.py
   （首字节 `0x02`）传给 `esf_set_mac`；它只影响报文，不修改网卡。
 - 同一时刻只有一个活动会话，不支持多账号同时在线。
 - 暂不支持手动选择网卡、Shizuku 接入、原生后端热更新。
+- Wi-Fi 联动是实验性功能，只在 Android 生效；Windows 侧未实现，
+  Android 10+ 也无法让 App 自己开关 Wi-Fi 或静默连接 SSID。
 - macOS / iOS：见后续 Apple 分支（`en0` 出口、iOS 网关探测、静态链接、
   Keychain 与侧载证书等）。

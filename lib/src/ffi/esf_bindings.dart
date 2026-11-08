@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ffi/ffi.dart';
 
 import 'esf_types.dart';
+import 'native_text.dart';
 
 /// 原生库加载与所有 `esf_*` 符号的绑定。
 ///
@@ -77,7 +78,7 @@ class EsfBindings {
     return DynamicLibrary.open(name);
   }
 
-  String get version => _esfVersion().toDartString();
+  String get version => decodeNativeUtf8(_esfVersion());
 
   late final EsfCreateDart _esfCreate = _lib
       .lookupFunction<EsfCreateNative, EsfCreateDart>('esf_create');
@@ -87,6 +88,25 @@ class EsfBindings {
       .lookupFunction<EsfSetCallbacksNative, EsfSetCallbacksDart>(
         'esf_set_callbacks',
       );
+  /// `esf_set_owned_event_cb` 是 v1.2.0 新增的；旧库没有这个符号。
+  /// 这里做一次探测，返回 null 表示宿主必须回退到旧的 `on_event` 契约。
+  EsfSetOwnedEventCbDart? get setOwnedEventCb {
+    if (_ownedEventProbed) return _ownedEventCb;
+    _ownedEventProbed = true;
+    try {
+      _ownedEventCb = _lib
+          .lookupFunction<EsfSetOwnedEventCbNative, EsfSetOwnedEventCbDart>(
+            'esf_set_owned_event_cb',
+          );
+    } on ArgumentError {
+      _ownedEventCb = null;
+    }
+    return _ownedEventCb;
+  }
+
+  EsfSetOwnedEventCbDart? _ownedEventCb;
+  bool _ownedEventProbed = false;
+
   late final EsfModeOfDart _esfModeOf = _lib
       .lookupFunction<EsfModeOfNative, EsfModeOfDart>('esf_mode_of');
   late final EsfSetModeDart _esfSetMode = _lib
@@ -236,7 +256,7 @@ class EsfBindings {
         : code.toNativeUtf8();
     final ptr = _esfErrorText(input);
     try {
-      return ptr == nullptr ? '' : ptr.toDartString();
+      return decodeNativeUtf8(ptr);
     } finally {
       if (ptr != nullptr) _esfFree(ptr);
       if (input.address != 0) malloc.free(input);
@@ -246,7 +266,7 @@ class EsfBindings {
   String takeString(Pointer<Pointer<Utf8>> out) {
     final ptr = out.value;
     if (ptr == nullptr) return '';
-    final text = ptr.toDartString();
+    final text = decodeNativeUtf8(ptr);
     _esfFree(ptr);
     out.value = nullptr;
     return text;

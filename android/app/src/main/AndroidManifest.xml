@@ -8,6 +8,14 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
+    <!-- Wi-Fi 联动（实验性）：只读当前 SSID，连接交给系统自动连接。
+         Android 10+ 不允许 App 开关 Wi-Fi，也不允许静默连接任意 SSID。 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
     <application
         android:label="校园网助手"
         android:name=".EsurfingApplication"

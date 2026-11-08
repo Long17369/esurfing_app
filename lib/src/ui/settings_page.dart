@@ -5,6 +5,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../platform/android_shell.dart';
 import '../platform/desktop_shell.dart';
+import '../platform/wifi_shell.dart';
 import '../state/app_controller.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -76,6 +77,9 @@ class SettingsPage extends StatelessWidget {
                 onChanged: (value) =>
                     controller.updateUi(ui.copyWith(notifications: value)),
               ),
+              const Divider(),
+              const _SectionHeader('Wi-Fi 联动（实验性）'),
+              _WifiTile(controller: controller),
               if (Platform.isAndroid) ...[
                 const Divider(),
                 const _SectionHeader('Android 后台'),
@@ -112,6 +116,49 @@ class _SectionHeader extends StatelessWidget {
         style: Theme.of(context).textTheme.titleSmall
             ?.copyWith(color: Theme.of(context).colorScheme.primary),
       ),
+    );
+  }
+}
+
+class _WifiTile extends StatelessWidget {
+  const _WifiTile({required this.controller});
+
+  final AppController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!WifiShell.supported) {
+      return const ListTile(
+        title: Text('Wi-Fi 自动登录'),
+        subtitle: Text('Windows 侧暂未实现；该功能目前只在 Android 生效'),
+        trailing: Chip(label: Text('未实现')),
+        enabled: false,
+      );
+    }
+    final status = controller.wifi;
+    final subtitle = !status.permissionGranted
+        ? '未授权：需要「附近的设备 / 位置信息」权限才能读取 Wi-Fi 名称'
+        : !status.enabled
+        ? 'Wi-Fi 已关闭'
+        : status.connected
+        ? '当前 Wi-Fi：${status.ssid}'
+        : '当前未连接 Wi-Fi';
+    return ListTile(
+      title: const Text('Wi-Fi 自动登录'),
+      subtitle: Text(
+        '$subtitle\n目标 Wi-Fi 在账号编辑页里设置，按账号生效',
+      ),
+      isThreeLine: true,
+      trailing: status.permissionGranted
+          ? IconButton(
+              tooltip: '刷新',
+              onPressed: () => controller.probeWifiSsid(),
+              icon: const Icon(Icons.refresh),
+            )
+          : TextButton(
+              onPressed: () => controller.requestWifiPermission(),
+              child: const Text('授权'),
+            ),
     );
   }
 }
