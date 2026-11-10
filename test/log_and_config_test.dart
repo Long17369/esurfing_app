@@ -47,6 +47,31 @@ void main() {
       // 老配置文件没有该字段时回落 info。
       expect(UiConfig.fromJson(const {}).logLevel, 'info');
     });
+
+    test('后台销毁与效率模式开关默认值、往返与旧配置回落', () {
+      const defaults = UiConfig();
+      expect(defaults.hideInBackground, isFalse);
+      expect(defaults.backgroundDestroyMinutes, 30);
+      expect(defaults.efficiencyMode, isTrue);
+
+      final json = defaults
+          .copyWith(
+            hideInBackground: true,
+            backgroundDestroyMinutes: 5,
+            efficiencyMode: false,
+          )
+          .toJson();
+      final restored = UiConfig.fromJson(json);
+      expect(restored.hideInBackground, isTrue);
+      expect(restored.backgroundDestroyMinutes, 5);
+      expect(restored.efficiencyMode, isFalse);
+
+      // 老配置文件缺这三个字段时使用默认值。
+      final legacy = UiConfig.fromJson(const {'closeToTray': false});
+      expect(legacy.hideInBackground, isFalse);
+      expect(legacy.backgroundDestroyMinutes, 30);
+      expect(legacy.efficiencyMode, isTrue);
+    });
   });
 
   group('保活间隔展示', () {

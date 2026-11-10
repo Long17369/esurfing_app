@@ -18,6 +18,8 @@ class SettingsPage extends StatelessWidget {
   final AppController controller;
   final DesktopShell desktopShell;
 
+  static const List<int> _destroyChoices = [5, 10, 30, 60, 120];
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -63,6 +65,23 @@ class SettingsPage extends StatelessWidget {
                     : null,
               ),
               SwitchListTile(
+                title: const Text('效率模式'),
+                subtitle: Text(
+                  DesktopShell.supported
+                      ? '隐藏到托盘时让 Windows 把本进程当作后台任务，减少 CPU 占用'
+                      : '仅 Windows 支持',
+                ),
+                value: ui.efficiencyMode,
+                onChanged: DesktopShell.supported
+                    ? (value) async {
+                        await controller.updateUi(
+                          ui.copyWith(efficiencyMode: value),
+                        );
+                        await desktopShell.syncEfficiencyMode();
+                      }
+                    : null,
+              ),
+              SwitchListTile(
                 title: const Text('退出时自动断开'),
                 subtitle: const Text('避免服务端残留在线会话'),
                 value: ui.logoutOnExit,
@@ -84,6 +103,36 @@ class SettingsPage extends StatelessWidget {
                 const Divider(),
                 const _SectionHeader('Android 后台'),
                 const _BatteryTile(),
+                SwitchListTile(
+                  title: const Text('隐藏后台'),
+                  subtitle: const Text('切到后台后把界面从最近任务里移除，保活与通知继续'),
+                  value: ui.hideInBackground,
+                  onChanged: (value) =>
+                      controller.updateUi(ui.copyWith(hideInBackground: value)),
+                ),
+                if (ui.hideInBackground)
+                  ListTile(
+                    title: const Text('后台多久后销毁界面'),
+                    subtitle: const Text('到时间后界面被销毁，点通知可重新打开'),
+                    trailing: DropdownButton<int>(
+                      value: _destroyChoices.contains(ui.backgroundDestroyMinutes)
+                          ? ui.backgroundDestroyMinutes
+                          : 30,
+                      items: [
+                        for (final minutes in _destroyChoices)
+                          DropdownMenuItem(
+                            value: minutes,
+                            child: Text('$minutes 分钟'),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        if (value == null) return;
+                        controller.updateUi(
+                          ui.copyWith(backgroundDestroyMinutes: value),
+                        );
+                      },
+                    ),
+                  ),
                 ListTile(
                   title: const Text('Shizuku 增强'),
                   subtitle: const Text('预留接口，本期未实现'),

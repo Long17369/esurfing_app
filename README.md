@@ -20,7 +20,11 @@
 - 在线锁定：连接中/已连接/保活中时，当前账号的配置与客户端模式不可修改，
   需先在主页断开；已连接时切换账号会先弹确认再断开
 - Windows：托盘常驻、关闭到托盘、开机自启、启动最小化、单实例
+- Windows：效率模式（EcoQoS，Win10 1709+）——窗口隐藏到托盘时把进程标记成
+  后台任务，减少 CPU 占用；设置页可关（`ui.efficiencyMode`，默认开）
 - Android：前台服务常驻通知、开机自启、电池优化白名单引导
+- Android：隐藏后台——置于后台达到设定时长后销毁界面并从最近任务里移除，
+  前台服务与保活继续，点通知重新打开（`ui.hideInBackground` / `ui.backgroundDestroyMinutes`）
 - 日志页：显示级别可选（DEBUG / INFO / WARN / ERROR，默认 INFO 且持久化在
   `ui.logLevel`），可复制当前级别，也可一键导出完整历史日志（含轮转文件）
 - Wi-Fi 联动（**实验性，仅 Android**）：每个账号可绑定一个目标 Wi-Fi，
@@ -143,13 +147,26 @@ Windows 构建用的是 MSYS2 的 mingw-w64（`esurfing_c` 的 CMake 里有 `-st
 `--gc-sections` 等 GCC 参数，MSVC 编不了）；DLL 是 CMake 的 RUNTIME 产物，
 落在 `build/bin/esurfing.dll`，`tool/build_native.sh` 会先找 `bin/` 再找 `lib/`。
 
+### 排障：android job 失败但没有任何日志
+
+`ubuntu-latest` 只有约 14 GB 可用磁盘，而镜像里预装的 dotnet / GHC / CodeQL /
+旧 NDK 本身就占 20 GB+。这套流程还要 Flutter SDK、Gradle 缓存、NDK、三个 ABI 的
+`libesurfing.so` 与 APK 中间产物，**磁盘写满时 runner 直接崩，日志来不及上传**——
+GitHub 上看到的就是「job 失败 + 整段日志缺失」，本地 `_diag` 里则是
+`IOException: No space left on device`。
+
+所以 android job 第一步会删掉用不到的预装件（`/usr/share/dotnet`、`/opt/ghc`、
+`/usr/local/.ghcup`、`/opt/hostedtoolcache/CodeQL`、预装 NDK / `system-images` /
+`emulator`）并 `docker image prune -af`，构建前后各打一次 `df -h`。
+遇到莫名的失败先看这两行磁盘数字。
+
 ## 版本与兼容
 
 App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.3.0+7` |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+8` |
 | 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 只校验主版本 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
@@ -223,6 +240,32 @@ python3 tool/make_icons.py
   断网重连的恢复交给核心保活线程自己退避重试（`keep_retry*`）。
 - 目标 Wi-Fi 断开时**不会**自动登出、也不会停止保活，会话与票据原样保留，
   只写一条日志。
+
+## 后台运行：Android 隐藏后台 / Windows 效率模式
+
+### Android 隐藏后台
+
+| 字段 | 含义 | 默认 |
+|---|---|---|
+| `ui.hideInBackground` | 置于后台达到设定时长后销毁界面 | `false` |
+| `ui.backgroundDestroyMinutes` | 后台停留多久后销毁（分钟），0 表示不销毁 | `30` |
+
+- Dart 侧监听 `AppLifecycleState.paused/hidden` 起计时，`resumed` 立即取消；
+  到点后经 `esurfing/android` channel 调 `destroyUi`，Kotlin 侧用
+  `finishAndRemoveTask()` 销毁 Activity 并把它从最近任务里移除。
+- `FlutterEngine` 由 `EsurfingApplication` 持有（`shouldDestroyEngineWithHost() = false`），
+  所以界面销毁后 Dart isolate、`SessionHost`、前台服务与保活都不受影响；
+  点通知会新建 Activity 挂回同一个 engine，界面状态直接复用，不会重新初始化。
+- 计时只在后台进行，回前台立刻取消；切换到 `inactive`（下拉通知栏等）不触发。
+
+### Windows 效率模式
+
+- `windows/runner/flutter_window.cpp` 在 `esurfing/windows` channel 上暴露
+  `setEfficiencyMode(bool)`，内部调 `SetProcessInformation(ProcessPowerThrottling,
+  PROCESS_POWER_THROTTLING_EXECUTION_SPEED)`；该 API 用 `GetProcAddress` 动态探测，
+  Windows 10 1709 以下返回 `false`，App 只写一条警告日志，不影响其它功能。
+- 窗口隐藏到托盘 → 开启；重新显示 → 关闭。设置页开关是 `ui.efficiencyMode`（默认开）。
+- 开启后任务管理器里该进程显示「效率模式」，保活与网络 I/O 照常，只是 CPU 被系统降级调度。
 
 ## 日志
 
