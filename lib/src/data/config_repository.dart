@@ -122,6 +122,9 @@ class UiConfig {
     this.logoutOnExit = false,
     this.notifications = true,
     this.logLevel = 'info',
+    this.hideInBackground = false,
+    this.backgroundDestroyMinutes = 30,
+    this.efficiencyMode = true,
   });
 
   final bool startMinimized;
@@ -133,6 +136,15 @@ class UiConfig {
   /// 日志页的显示级别下限（debug / info / warn / error），默认 info。
   final String logLevel;
 
+  /// Android：置于后台后销毁界面（从最近任务移除），保活与前台服务继续。
+  final bool hideInBackground;
+
+  /// 后台停留多久后销毁界面（分钟），0 表示不销毁。
+  final int backgroundDestroyMinutes;
+
+  /// Windows：窗口隐藏到托盘时让系统把本进程当作效率模式（EcoQoS）运行。
+  final bool efficiencyMode;
+
   UiConfig copyWith({
     bool? startMinimized,
     bool? closeToTray,
@@ -140,6 +152,9 @@ class UiConfig {
     bool? logoutOnExit,
     bool? notifications,
     String? logLevel,
+    bool? hideInBackground,
+    int? backgroundDestroyMinutes,
+    bool? efficiencyMode,
   }) => UiConfig(
     startMinimized: startMinimized ?? this.startMinimized,
     closeToTray: closeToTray ?? this.closeToTray,
@@ -147,6 +162,10 @@ class UiConfig {
     logoutOnExit: logoutOnExit ?? this.logoutOnExit,
     notifications: notifications ?? this.notifications,
     logLevel: logLevel ?? this.logLevel,
+    hideInBackground: hideInBackground ?? this.hideInBackground,
+    backgroundDestroyMinutes:
+        backgroundDestroyMinutes ?? this.backgroundDestroyMinutes,
+    efficiencyMode: efficiencyMode ?? this.efficiencyMode,
   );
 
   Map<String, Object?> toJson() => {
@@ -156,6 +175,9 @@ class UiConfig {
     'logoutOnExit': logoutOnExit,
     'notifications': notifications,
     'logLevel': logLevel,
+    'hideInBackground': hideInBackground,
+    'backgroundDestroyMinutes': backgroundDestroyMinutes,
+    'efficiencyMode': efficiencyMode,
   };
 
   factory UiConfig.fromJson(Map<String, Object?> json) => UiConfig(
@@ -165,6 +187,10 @@ class UiConfig {
     logoutOnExit: json['logoutOnExit'] as bool? ?? false,
     notifications: json['notifications'] as bool? ?? true,
     logLevel: json['logLevel'] as String? ?? 'info',
+    hideInBackground: json['hideInBackground'] as bool? ?? false,
+    backgroundDestroyMinutes:
+        (json['backgroundDestroyMinutes'] as num?)?.toInt() ?? 30,
+    efficiencyMode: json['efficiencyMode'] as bool? ?? true,
   );
 }
 

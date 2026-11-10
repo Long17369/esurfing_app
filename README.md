@@ -20,7 +20,11 @@
 - 在线锁定：连接中/已连接/保活中时，当前账号的配置与客户端模式不可修改，
   需先在主页断开；已连接时切换账号会先弹确认再断开
 - Windows：托盘常驻、关闭到托盘、开机自启、启动最小化、单实例
+- Windows：效率模式（EcoQoS，Win10 1709+）——窗口隐藏到托盘时把进程标记成
+  后台任务，减少 CPU 占用；设置页可关（`ui.efficiencyMode`，默认开）
 - Android：前台服务常驻通知、开机自启、电池优化白名单引导
+- Android：隐藏后台——置于后台达到设定时长后销毁界面并从最近任务里移除，
+  前台服务与保活继续，点通知重新打开（`ui.hideInBackground` / `ui.backgroundDestroyMinutes`）
 - 日志页：显示级别可选（DEBUG / INFO / WARN / ERROR，默认 INFO 且持久化在
   `ui.logLevel`），可复制当前级别，也可一键导出完整历史日志（含轮转文件）
 - Wi-Fi 联动（**实验性，仅 Android**）：每个账号可绑定一个目标 Wi-Fi，
@@ -45,9 +49,12 @@ tool/              原生库构建与打包脚本
 |---|---|
 | Flutter | Flutter 3.47+ / Dart 3.13+ |
 | Android | Android SDK、NDK **28.2.13676358**、JDK 17+ |
-| Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake`） |
+| Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake` + `ninja`） |
 | Windows 应用 | Visual Studio 2022（Desktop development with C++） |
 
+> Windows 端不用本地装 MinGW：CI 会编好 `esurfing.dll` 并出 zip，本地只跑
+> `flutter run -d windows` 的话把 CI 的 zip 解开用即可；要本地编原生库见上一节。
+>
 > 首次 Android 构建需要访问 `services.gradle.org` 和 `maven.google.com`
 > 下载 Gradle 与 Android 依赖；网络受限时会长时间停在依赖解析阶段。
 
@@ -103,13 +110,63 @@ tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
 tool/package_android.sh    # -> dist/app-<abi>-release.apk
 ```
 
+## CI 与分支约定
+
+分支：`dev` 是开发分支，**所有改动先提交到 `dev`**；`main` 只放发布快照
+（`dev` 通过后再快进/合并过去）。
+
+Tag：从 App `1.3.0` 起每次发版打 `v<semver>`（与 `pubspec.yaml` 的版本一致，
+不带 `+build`，例如 `v1.3.0`），打在 `dev` 的发布提交上。`main` 上没有 workflow，
+把 tag 打在 `dev` 才能让 CI 出包。
+
+`.github/workflows/build.yml` 做四件事：
+
+| job | 触发 | 产物 |
+|---|---|---|
+| `analyze & test` | 每次 push / PR | `flutter analyze` + `flutter test` |
+| `windows x64` | 每次 push / PR | MSYS2 MinGW 编 `esurfing.dll` → `flutter build windows --release` → `dist/esurfing-app-windows-x64-<ver>.zip` |
+| `android apk` | 每次 push / PR | 重编三个 ABI 的 `libesurfing.so` → `flutter build apk --release` → `dist/esurfing-app-android-<ver>.apk` |
+| `release` | 仅 `v*` tag | 把上面两个产物挂到 GitHub Release |
+
+### 绑定的 C 库版本
+
+C 库直接由官方 `actions/checkout` 拉（`repository` + `ref` + `path: esurfing_c`），
+地址与版本都走变量，仓库里不写死：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ESURFING_C_REPO`（Actions 变量） | `<当前 owner>/esurfing_c` | C 库仓库，`owner/repo` 或完整 git 地址都行 |
+| `ESURFING_C_TOKEN` / `PAT_TOKEN`（Secret） | 空 | **C 库私有后必需**。fine-grained PAT 要勾上 `esurfing_c` 且给 `Contents: Read-only`：只有 `Metadata: Read`（这个权限是 PAT 自带的）时 REST API 能读，但 `git clone/fetch` 仍返回 `Repository not found.` —— GitHub 用 404 隐藏私有库，不会回 403。改 PAT 权限**不会换 token 值**，Secret 不用动，直接 Re-run |
+| `ESURFING_C_DEPLOY_KEY`（Secret） | 空 | 备选：只读 Deploy Key 私钥。用时把 `ESURFING_C_REPO` 写成 `git@github.com:<owner>/esurfing_c.git`（公钥加到 `esurfing_c` → Settings → Deploy keys，不勾 write） |
+| `ESURFING_C_REF`（Actions 变量） | `v1.2.1` | **必须是 tag**，tag 不存在就直接失败，没有回退 commit |
+
+升级 C 库的流程：C 库仓库打 tag 并推送 → 改 `ESURFING_C_REF`（或仓库变量）→
+本地 `tool/build_native.sh all` 重编 `jniLibs` 与 DLL 并提交 → App 版本号按需递增。
+
+Windows 构建用的是 MSYS2 的 mingw-w64（`esurfing_c` 的 CMake 里有 `-static`、
+`--gc-sections` 等 GCC 参数，MSVC 编不了）；DLL 是 CMake 的 RUNTIME 产物，
+落在 `build/bin/esurfing.dll`，`tool/build_native.sh` 会先找 `bin/` 再找 `lib/`。
+
+### 排障：android job 失败但没有任何日志
+
+`ubuntu-latest` 只有约 14 GB 可用磁盘，而镜像里预装的 dotnet / GHC / CodeQL /
+旧 NDK 本身就占 20 GB+。这套流程还要 Flutter SDK、Gradle 缓存、NDK、三个 ABI 的
+`libesurfing.so` 与 APK 中间产物，**磁盘写满时 runner 直接崩，日志来不及上传**——
+GitHub 上看到的就是「job 失败 + 整段日志缺失」，本地 `_diag` 里则是
+`IOException: No space left on device`。
+
+所以 android job 第一步会删掉用不到的预装件（`/usr/share/dotnet`、`/opt/ghc`、
+`/usr/local/.ghcup`、`/opt/hostedtoolcache/CodeQL`、预装 NDK / `system-images` /
+`emulator`）并 `docker image prune -af`，构建前后各打一次 `df -h`。
+遇到莫名的失败先看这两行磁盘数字。
+
 ## 版本与兼容
 
 App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.3.0+7` |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+8` |
 | 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 只校验主版本 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
@@ -183,6 +240,32 @@ python3 tool/make_icons.py
   断网重连的恢复交给核心保活线程自己退避重试（`keep_retry*`）。
 - 目标 Wi-Fi 断开时**不会**自动登出、也不会停止保活，会话与票据原样保留，
   只写一条日志。
+
+## 后台运行：Android 隐藏后台 / Windows 效率模式
+
+### Android 隐藏后台
+
+| 字段 | 含义 | 默认 |
+|---|---|---|
+| `ui.hideInBackground` | 置于后台达到设定时长后销毁界面 | `false` |
+| `ui.backgroundDestroyMinutes` | 后台停留多久后销毁（分钟），0 表示不销毁 | `30` |
+
+- Dart 侧监听 `AppLifecycleState.paused/hidden` 起计时，`resumed` 立即取消；
+  到点后经 `esurfing/android` channel 调 `destroyUi`，Kotlin 侧用
+  `finishAndRemoveTask()` 销毁 Activity 并把它从最近任务里移除。
+- `FlutterEngine` 由 `EsurfingApplication` 持有（`shouldDestroyEngineWithHost() = false`），
+  所以界面销毁后 Dart isolate、`SessionHost`、前台服务与保活都不受影响；
+  点通知会新建 Activity 挂回同一个 engine，界面状态直接复用，不会重新初始化。
+- 计时只在后台进行，回前台立刻取消；切换到 `inactive`（下拉通知栏等）不触发。
+
+### Windows 效率模式
+
+- `windows/runner/flutter_window.cpp` 在 `esurfing/windows` channel 上暴露
+  `setEfficiencyMode(bool)`，内部调 `SetProcessInformation(ProcessPowerThrottling,
+  PROCESS_POWER_THROTTLING_EXECUTION_SPEED)`；该 API 用 `GetProcAddress` 动态探测，
+  Windows 10 1709 以下返回 `false`，App 只写一条警告日志，不影响其它功能。
+- 窗口隐藏到托盘 → 开启；重新显示 → 关闭。设置页开关是 `ui.efficiencyMode`（默认开）。
+- 开启后任务管理器里该进程显示「效率模式」，保活与网络 I/O 照常，只是 CPU 被系统降级调度。
 
 ## 日志
 

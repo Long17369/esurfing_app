@@ -70,6 +70,10 @@ class EsurfingApplication : android.app.Application() {
                         openWifiPanel()
                         result.success(null)
                     }
+                    "destroyUi" -> {
+                        destroyUi()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -81,6 +85,17 @@ class EsurfingApplication : android.app.Application() {
 
     fun detachActivity(activity: Activity) {
         if (activityRef?.get() === activity) activityRef = null
+    }
+
+    /**
+     * 销毁界面并把它从最近任务里移除，但 FlutterEngine 与前台服务都留着，
+     * 保活照常跑。点通知会重新建一个 Activity 挂到同一个 engine 上，
+     * Dart 侧 State 与列表位置都还在。
+     */
+    private fun destroyUi() {
+        val activity = activityRef?.get() ?: return
+        activityRef = null
+        activity.runOnUiThread { activity.finishAndRemoveTask() }
     }
 
     private fun requestNotificationPermission() {

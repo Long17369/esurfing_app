@@ -27,6 +27,12 @@ class AndroidShell {
     await _invoke('requestIgnoreBatteryOptimizations');
   }
 
+  /// 销毁界面并从最近任务里移除，前台服务与 Dart 会话保持不变。
+  static Future<void> destroyUi() async {
+    if (!supported) return;
+    await _invoke('destroyUi');
+  }
+
   static Future<void> _invoke(String method) async {
     try {
       await _channel.invokeMethod<void>(method);

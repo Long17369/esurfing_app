@@ -1,6 +1,10 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
+import 'platform/android_shell.dart';
 import 'platform/desktop_shell.dart';
 import 'state/app_controller.dart';
 import 'ui/accounts_page.dart';
@@ -60,8 +64,60 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _index = 0;
+  Timer? _backgroundTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _backgroundTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (!Platform.isAndroid) return;
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _cancelBackgroundDestroy();
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        _armBackgroundDestroy();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  void _cancelBackgroundDestroy() {
+    _backgroundTimer?.cancel();
+    _backgroundTimer = null;
+  }
+
+  /// 长时间留在后台就销毁界面（也从最近任务里移除），保活与前台服务不动。
+  void _armBackgroundDestroy() {
+    _cancelBackgroundDestroy();
+    final ui = widget.controller.config.ui;
+    final minutes = ui.backgroundDestroyMinutes;
+    if (!ui.hideInBackground || minutes <= 0) return;
+    _backgroundTimer = Timer(Duration(minutes: minutes), () {
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        return;
+      }
+      widget.controller.logs.add(
+        '已置于后台 $minutes 分钟，销毁界面（保活继续）',
+      );
+      AndroidShell.destroyUi();
+    });
+  }
 
   static const _destinations = [
     NavigationDestination(
