@@ -3,7 +3,8 @@ name: build
 # 触发：push dev/main、v* tag（出 Release）、PR、手动
 on:
   push:
-    branches: [dev, main]
+    # ci/** 分支用来单独验证 workflow 改动，验证完再并回 dev。
+    branches: [dev, main, 'ci/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -116,6 +117,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ubuntu-latest 只有约 14 GB 可用磁盘，预装镜像里 dotnet/ghc/CodeQL/旧 NDK 等
+      # 就占了 20 GB+。这套流程要 Flutter SDK + Gradle 缓存 + NDK + 三个 ABI 的 so
+      # 与 APK 中间产物，磁盘一满 runner 连日志都写不出来（报错在 _diag 里，
+      # GitHub 上表现为「job 失败且整段日志缺失」）。所以先把用不到的预装件删掉。
+      - name: 腾出磁盘空间
+        run: |
+          echo "== before =="; df -h / /mnt 2>/dev/null | sed -n '1,5p'
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android/sdk/ndk \
+            /usr/local/lib/android/sdk/system-images \
+            /usr/local/lib/android/sdk/emulator
+          docker image prune -af >/dev/null 2>&1 || true
+          echo "== after =="; df -h / /mnt 2>/dev/null | sed -n '1,5p'
+
       - name: 还原 libesurfing.so 缓存
         id: native
         uses: actions/cache@v4
@@ -163,11 +181,14 @@ jobs:
 
       - name: 构建并打包 APK
         run: |
+          df -h / | tail -1
           flutter pub get
           flutter build apk --release
           version="$(sed -n 's/^version: *//p' pubspec.yaml)"
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk "dist/esurfing-app-android-$version.apk"
+          ls -l dist/
+          df -h / | tail -1
 
       - uses: actions/upload-artifact@v4
         with:
