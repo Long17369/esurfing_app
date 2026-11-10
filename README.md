@@ -45,9 +45,12 @@ tool/              原生库构建与打包脚本
 |---|---|
 | Flutter | Flutter 3.47+ / Dart 3.13+ |
 | Android | Android SDK、NDK **28.2.13676358**、JDK 17+ |
-| Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake`） |
+| Windows 原生库 | MSYS2 MinGW-w64（`mingw-w64-x86_64-gcc` + `cmake` + `ninja`） |
 | Windows 应用 | Visual Studio 2022（Desktop development with C++） |
 
+> Windows 端不用本地装 MinGW：CI 会编好 `esurfing.dll` 并出 zip，本地只跑
+> `flutter run -d windows` 的话把 CI 的 zip 解开用即可；要本地编原生库见上一节。
+>
 > 首次 Android 构建需要访问 `services.gradle.org` 和 `maven.google.com`
 > 下载 Gradle 与 Android 依赖；网络受限时会长时间停在依赖解析阶段。
 
@@ -102,6 +105,43 @@ flutter run -d android     # 需要真机/模拟器
 tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
 tool/package_android.sh    # -> dist/app-<abi>-release.apk
 ```
+
+## CI 与分支约定
+
+分支：`dev` 是开发分支，**所有改动先提交到 `dev`**；`main` 只放发布快照
+（`dev` 通过后再快进/合并过去）。
+
+Tag：从 App `1.3.0` 起每次发版打 `v<semver>`（与 `pubspec.yaml` 的版本一致，
+不带 `+build`，例如 `v1.3.0`），打在 `dev` 的发布提交上。`main` 上没有 workflow，
+把 tag 打在 `dev` 才能让 CI 出包。
+
+`.github/workflows/build.yml` 做四件事：
+
+| job | 触发 | 产物 |
+|---|---|---|
+| `analyze & test` | 每次 push / PR | `flutter analyze` + `flutter test` |
+| `windows x64` | 每次 push / PR | MSYS2 MinGW 编 `esurfing.dll` → `flutter build windows --release` → `dist/esurfing-app-windows-x64-<ver>.zip` |
+| `android apk` | 每次 push / PR | 重编三个 ABI 的 `libesurfing.so` → `flutter build apk --release` → `dist/esurfing-app-android-<ver>.apk` |
+| `release` | 仅 `v*` tag | 把上面两个产物挂到 GitHub Release |
+
+### 绑定的 C 库版本
+
+C 库直接由官方 `actions/checkout` 拉（`repository` + `ref` + `path: esurfing_c`），
+地址与版本都走变量，仓库里不写死：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `ESURFING_C_REPO`（Actions 变量） | `<当前 owner>/esurfing_c` | C 库仓库，`owner/repo` 或完整 git 地址都行 |
+| `ESURFING_C_TOKEN` / `PAT_TOKEN`（Secret） | 空 | **C 库私有后必需**。fine-grained PAT 要勾上 `esurfing_c` 且给 `Contents: Read-only`：只有 `Metadata: Read`（这个权限是 PAT 自带的）时 REST API 能读，但 `git clone/fetch` 仍返回 `Repository not found.` —— GitHub 用 404 隐藏私有库，不会回 403。改 PAT 权限**不会换 token 值**，Secret 不用动，直接 Re-run |
+| `ESURFING_C_DEPLOY_KEY`（Secret） | 空 | 备选：只读 Deploy Key 私钥。用时把 `ESURFING_C_REPO` 写成 `git@github.com:<owner>/esurfing_c.git`（公钥加到 `esurfing_c` → Settings → Deploy keys，不勾 write） |
+| `ESURFING_C_REF`（Actions 变量） | `v1.2.1` | **必须是 tag**，tag 不存在就直接失败，没有回退 commit |
+
+升级 C 库的流程：C 库仓库打 tag 并推送 → 改 `ESURFING_C_REF`（或仓库变量）→
+本地 `tool/build_native.sh all` 重编 `jniLibs` 与 DLL 并提交 → App 版本号按需递增。
+
+Windows 构建用的是 MSYS2 的 mingw-w64（`esurfing_c` 的 CMake 里有 `-static`、
+`--gc-sections` 等 GCC 参数，MSVC 编不了）；DLL 是 CMake 的 RUNTIME 产物，
+落在 `build/bin/esurfing.dll`，`tool/build_native.sh` 会先找 `bin/` 再找 `lib/`。
 
 ## 版本与兼容
 
