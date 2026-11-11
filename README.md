@@ -125,7 +125,7 @@ Tag：从 App `1.3.0` 起每次发版打 `v<semver>`（与 `pubspec.yaml` 的版
 |---|---|---|
 | `analyze & test` | 每次 push / PR | `flutter analyze` + `flutter test` |
 | `windows x64` | 每次 push / PR | MSYS2 MinGW 编 `esurfing.dll` → `flutter build windows --release` → `dist/esurfing-app-windows-x64-<ver>.zip` |
-| `android apk` | 每次 push / PR | 重编三个 ABI 的 `libesurfing.so` → `flutter build apk --release` → `dist/esurfing-app-android-<ver>.apk` |
+| `android apk` | 每次 push / PR | 重编三个 ABI 的 `libesurfing.so` → 用固定 release 密钥签名 `flutter build apk --release` → `dist/esurfing-app-android-<ver>.apk` |
 | `release` | 仅 `v*` tag | 把上面两个产物挂到 GitHub Release |
 
 ### 绑定的 C 库版本
@@ -146,6 +146,39 @@ C 库直接由官方 `actions/checkout` 拉（`repository` + `ref` + `path: esur
 Windows 构建用的是 MSYS2 的 mingw-w64（`esurfing_c` 的 CMake 里有 `-static`、
 `--gc-sections` 等 GCC 参数，MSVC 编不了）；DLL 是 CMake 的 RUNTIME 产物，
 落在 `build/bin/esurfing.dll`，`tool/build_native.sh` 会先找 `bin/` 再找 `lib/`。
+
+### release 签名密钥（本地与 CI 共用同一份）
+
+release APK 用固定密钥签名，任何机器打出来的包签名一致 —— 换签名后旧包**无法覆盖安装**
+（系统会报签名冲突），所以密钥不能每次重建、也不能各人一份。
+
+- 密钥库：`android/keystore/release.jks`（PKCS12，alias `esurfing`，RSA 2048，有效期 100 年），
+  证书 `SHA-256 = 53:28:02:EA:DC:4C:CE:1E:3F:D4:E5:26:9C:F8:97:69:83:47:F1:4A:D2:76:11:0E:75:D6:B2:94:01:10:B8:34`。
+- **这两样都不入库**：`.gitignore` 里挡了 `android/keystore/` 与 `android/key.properties`。
+- Gradle 读 `android/key.properties`（`storeFile` / `storePassword` / `keyAlias` /
+  `keyPassword`，格式见 `android/key.properties.example`）；没有该文件时退回 debug 签名
+  并打一条 warn，方便别人 clone 后直接 `flutter run --release`。
+- CI 不需要这个文件：`android apk` job 的「还原 release 签名密钥」步骤从 Secrets
+  还原 keystore 与 `key.properties`，打完包再用 `apksigner --print-certs` 把实际签名者打出来。
+  缺 Secrets 时：**打 tag 发版直接失败**（不允许发出 debug 签名的包），
+  日常 push / PR 只打一条 warning 并退回 debug 签名 —— 免得没配密钥前流水线一直红。
+
+换机器 / 重新配置时：
+
+```bash
+# 把 keystore 的 base64 和口令打出来，填进仓库 Settings → Secrets → Actions
+tool/android_signing.sh export
+# 核对 APK 是不是这套密钥签的
+tool/android_signing.sh verify build/app/outputs/flutter-apk/app-release.apk
+```
+
+| Secret | 内容 |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | `android/keystore/release.jks` 的 base64（单行，无换行） |
+| `ANDROID_KEYSTORE_PASSWORD` | `android/key.properties` 里的 `storePassword` |
+
+> PKCS12 不支持与 store 口令不同的 key 口令，所以 `keyPassword` 与 `storePassword` 相同，
+> 只需要一个 Secret。真丢了密钥就只能换签名重新发给用户重装（无法升级覆盖）。
 
 ### 排障：android job 失败但没有任何日志
 

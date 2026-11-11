@@ -1,0 +1,7 @@
+# 复制为 android/key.properties 后填入自己的值（该文件不入库）。
+# CI 不需要这个文件：workflow 会用 Secrets 里的 ANDROID_KEYSTORE_BASE64 /
+# ANDROID_KEYSTORE_PASSWORD 现场还原 keystore 和本文件。
+storeFile=keystore/release.jks
+storePassword=<keystore 口令>
+keyAlias=esurfing
+keyPassword=<key 口令，PKCS12 下与 keystore 口令相同>
