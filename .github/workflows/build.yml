@@ -179,6 +179,33 @@ jobs:
           channel: stable
           cache: true
 
+      - name: 还原 release 签名密钥
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          # 固定密钥：任何机器上打出来的包签名一致，否则换机器后升级装不上。
+          # 只在打 tag 出 Release 时强制要求；日常 push/PR 缺 Secrets 就退回 debug 签名，
+          # 免得没配密钥前整条流水线一直是红的。
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ]; then
+            if [ "$REF_TYPE" = tag ]; then
+              echo "::error::发版必须用固定密钥，但缺少 Secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD"
+              echo "在本地运行 tool/android_signing.sh export 生成这两个值并填进仓库 Secrets"
+              exit 1
+            fi
+            echo "::warning::缺少签名 Secrets，本次 APK 将使用 debug 签名（不影响发版流程之外的使用）"
+            exit 0
+          fi
+          mkdir -p android/keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/keystore/release.jks
+          {
+            echo "storeFile=keystore/release.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=esurfing"
+            echo "keyPassword=$STORE_PASSWORD"
+          } > android/key.properties
+
       - name: 构建并打包 APK
         run: |
           df -h / | tail -1
@@ -187,6 +214,8 @@ jobs:
           version="$(sed -n 's/^version: *//p' pubspec.yaml)"
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk "dist/esurfing-app-android-$version.apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$apksigner" verify --print-certs "dist/esurfing-app-android-$version.apk" | head -4
           ls -l dist/
           df -h / | tail -1
 
