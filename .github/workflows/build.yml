@@ -205,6 +205,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # release job 没有 checkout（只下载产物），gh 找不到本地 git 仓库会直接
+      # 报 fatal: not a git repository，所以每条命令都显式给 --repo。
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -214,8 +216,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
