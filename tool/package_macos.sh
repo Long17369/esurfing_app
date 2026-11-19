@@ -58,6 +58,10 @@ if grep -q 'com.apple.security.cs.allow-jit' <<<"$entitlement_dump"; then
   echo "error: release app still contains allow-jit" >&2
   exit 1
 fi
+if grep -q 'com.apple.security.app-sandbox' <<<"$entitlement_dump"; then
+  echo "error: ad-hoc release app still contains app sandbox" >&2
+  exit 1
+fi
 codesign -dvv "$app" 2>&1 | grep -q 'Signature=adhoc' || {
   echo "error: expected an explicitly ad-hoc test signature" >&2
   exit 1

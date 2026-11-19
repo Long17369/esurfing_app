@@ -234,7 +234,7 @@ App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+9` |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+10` |
 | 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 校验主版本及安全事件接口能力 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
@@ -361,7 +361,8 @@ python3 tool/make_icons.py
   并在系统设置里关闭本应用的电池优化、允许自启动，否则后台保活会被厂商策略中断。
 - **macOS**：解压通用包后将 `.app` 放入 Applications 等固定位置再设置自启动，
   避免移动后登录项失效。CI 使用 ad-hoc 签名而非 Developer ID，不提供 Apple 公证；
-  系统可能阻止打开，按组织政策与系统提供的批准入口处理，不关闭 Gatekeeper。
+  Release 测试包不启用 App Sandbox，以便无 Team ID 时使用默认 Keychain；它不是正式
+  发行安全模型，系统仍可能阻止打开。按组织政策与系统提供的批准入口处理，不关闭 Gatekeeper。
 - 两端都只支持侧载，不上架应用商店。
 
 ## 已知限制
