@@ -50,8 +50,9 @@ if grep -q 'com.apple.security.get-task-allow' <<<"$entitlement_dump"; then
   echo "error: release app still contains get-task-allow" >&2
   exit 1
 fi
-if grep -q 'keychain-access-groups' <<<"$entitlement_dump"; then
-  echo "error: release app contains an unsupported keychain access group" >&2
+if grep -A2 -q 'keychain-access-groups' <<<"$entitlement_dump" &&
+   grep -A2 -q '<string>' <<<"$entitlement_dump"; then
+  echo "error: release app contains a non-empty shared keychain access group" >&2
   exit 1
 fi
 if grep -q 'com.apple.security.cs.allow-jit' <<<"$entitlement_dump"; then

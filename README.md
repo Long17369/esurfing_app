@@ -234,7 +234,7 @@ App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+10` |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+11` |
 | 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 校验主版本及安全事件接口能力 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
