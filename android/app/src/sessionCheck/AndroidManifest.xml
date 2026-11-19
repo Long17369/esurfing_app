@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application android:name=".SessionCheckApplication"
+        android:label="Esurfing isolated check"
+        tools:replace="android:name,android:label">
+        <receiver android:name=".SessionCheckReceiver" android:exported="true"/>
+        <receiver android:name=".BootReceiver" tools:node="remove"/>
+    </application>
+</manifest>

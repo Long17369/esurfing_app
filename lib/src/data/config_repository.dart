@@ -269,11 +269,12 @@ class ConfigRepository {
 
   final File _file;
   AppConfig _cache = const AppConfig();
+  Future<void> _writes = Future.value();
 
   AppConfig get value => _cache;
 
-  static Future<ConfigRepository> open() async {
-    final dir = await getApplicationSupportDirectory();
+  static Future<ConfigRepository> open({Directory? directory}) async {
+    final dir = directory ?? await getApplicationSupportDirectory();
     await dir.create(recursive: true);
     final repo = ConfigRepository._(File('${dir.path}/config.json'));
     await repo.reload();
@@ -287,23 +288,33 @@ class ConfigRepository {
     }
     try {
       final raw = jsonDecode(await _file.readAsString());
-      if (raw is Map<String, dynamic>) {
-        _cache = AppConfig.fromJson(raw);
+      if (raw is! Map<String, dynamic>) {
+        throw const FormatException('配置根节点不是对象');
       }
+      _cache = AppConfig.fromJson(raw);
     } on FormatException {
       // 配置损坏时保留一份备份，回到默认配置，避免应用无法启动。
+      await _file.copy('${_file.path}.broken');
+      _cache = const AppConfig();
+    } on TypeError {
       await _file.copy('${_file.path}.broken');
       _cache = const AppConfig();
     }
   }
 
-  Future<void> save(AppConfig config) async {
-    _cache = config;
+  Future<void> save(AppConfig config) {
+    final write = _writes.then((_) => _save(config));
+    _writes = write.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    return write;
+  }
+
+  Future<void> _save(AppConfig config) async {
     final tmp = File('${_file.path}.tmp');
     await tmp.writeAsString(
       const JsonEncoder.withIndent('  ').convert(config.toJson()),
       flush: true,
     );
     await tmp.rename(_file.path);
+    _cache = config;
   }
 }

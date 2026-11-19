@@ -149,17 +149,19 @@ class LogRepository extends ChangeNotifier {
         .first;
     final dir = await _exportDirectory();
     await dir.create(recursive: true);
-    final target = File('${dir.path}${Platform.pathSeparator}'
-        'esurfing-log-$stamp.log');
+    final target = File(
+      '${dir.path}${Platform.pathSeparator}'
+      'esurfing-log-$stamp.log',
+    );
     await target.writeAsString(await collectAll(), flush: true);
     return target;
   }
 
   Future<Directory> _exportDirectory() async {
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (Platform.isAndroid) {
       final external = await getExternalStorageDirectory();
       if (external != null) return Directory('${external.path}/logs');
-    } else {
+    } else if (!Platform.isIOS) {
       final downloads = await getDownloadsDirectory();
       if (downloads != null) return Directory('${downloads.path}/esurfing');
     }

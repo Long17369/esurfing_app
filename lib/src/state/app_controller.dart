@@ -18,13 +18,14 @@ class AppController extends ChangeNotifier {
   final ConfigRepository configRepository;
   final CredentialStore credentials;
   final LogRepository logs;
-  final HostClient _host = HostClient();
+  final HostClient _host;
 
   AppController({
     required this.configRepository,
     required this.credentials,
     required this.logs,
-  });
+    HostClient? host,
+  }) : _host = host ?? HostClient();
 
   static const MethodChannel _android = MethodChannel('esurfing/android');
 
@@ -43,6 +44,11 @@ class AppController extends ChangeNotifier {
   DateTime? _pendingWifiDeadline;
   String _autoLoginSsidDone = '';
   bool _loginInFlight = false;
+  bool _disposed = false;
+  Future<void>? _shutdownFuture;
+  StreamSubscription<SessionSnapshot>? _stateSubscription;
+  StreamSubscription<SessionEvent>? _eventSubscription;
+  String? _nativeCompatibilityError = '原生后端尚未就绪，请稍后重试';
 
   AppConfig get config => _config;
   SessionSnapshot get snapshot => _snapshot;
@@ -60,10 +66,11 @@ class AppController extends ChangeNotifier {
   /// 连接中、认证中、已连接、保活中都不允许改动当前正在使用的账号，
   /// 避免配置和实际会话脱节。
   bool isAccountLocked(String id) =>
-      _config.activeAccountId == id && hasLockedSession;
+      activeAccount?.id == id && hasLockedSession;
 
   /// 当前是否存在「正在使用或正在进行」的会话（主页/设置用于禁用编辑入口）。
-  bool get hasLockedSession => _snapshot.isOnline || _snapshot.isBusy;
+  bool get hasLockedSession =>
+      _loginInFlight || _snapshot.isOnline || _snapshot.isBusy;
 
   /// 日志页的显示级别下限。
   LogLevel get logLevel => logs.minLevel;
@@ -81,8 +88,7 @@ class AppController extends ChangeNotifier {
   String get targetSsid => (activeAccount?.wifiSsid ?? '').trim();
 
   /// 是否已经连在目标 Wi-Fi 上。
-  bool get onTargetWifi =>
-      targetSsid.isNotEmpty && currentSsid == targetSsid;
+  bool get onTargetWifi => targetSsid.isNotEmpty && currentSsid == targetSsid;
 
   /// 是否正在「点登录 → 等系统连上目标 Wi-Fi → 再登录」。
   bool get waitingForWifi => _pendingWifiSsid.isNotEmpty;
@@ -100,8 +106,7 @@ class AppController extends ChangeNotifier {
 
   /// 本次登录实际使用的客户端模式：主页覆盖优先，其次账号配置。
   int get sessionMode =>
-      _sessionMode ??
-      EsfMode.normalize(activeAccount?.mode ?? EsfMode.auto);
+      _sessionMode ?? EsfMode.normalize(activeAccount?.mode ?? EsfMode.auto);
 
   static Future<AppController> create() async {
     final controller = AppController(
@@ -109,11 +114,11 @@ class AppController extends ChangeNotifier {
       credentials: CredentialStore(),
       logs: LogRepository(),
     );
-    await controller._init();
+    await controller.initialize();
     return controller;
   }
 
-  Future<void> _init() async {
+  Future<void> initialize() async {
     await logs.init();
     _config = configRepository.value;
     logs.minLevel = LogLevelX.parse(_config.ui.logLevel);
@@ -130,36 +135,40 @@ class AppController extends ChangeNotifier {
       _config = config;
     }
 
-    _host.states.listen(_onState);
-    _host.events.listen(_onEvent);
+    _stateSubscription = _host.states.listen(_onState);
+    _eventSubscription = _host.events.listen(_onEvent);
     try {
       await _host.start();
       final version = await _host.send('version');
       _nativeVersion = version['version']?.toString() ?? '';
       logs.add('原生后端版本：$_nativeVersion');
-      if (!_versionCompatible(_nativeVersion)) {
-        _lastError = '原生后端版本不符（$_nativeVersion），请重新构建。';
+      _nativeCompatibilityError = version['compatibilityError'] as String?;
+      if (_nativeCompatibilityError != null) {
+        _lastError = _nativeCompatibilityError!;
         logs.add(_lastError, level: LogLevel.error);
       }
     } catch (error) {
       _lastError = '原生后端加载失败：$error';
+      _nativeCompatibilityError = _lastError;
       logs.add(_lastError, level: LogLevel.error);
     }
 
+    if (_disposed) return;
     _ready = true;
     _restartWifiWatch();
     notifyListeners();
     unawaited(autoConnectIfNeeded());
   }
 
-  bool _versionCompatible(String version) {
-    if (version.isEmpty) return false;
-    // 只校验原生库的 ABI 主版本；补丁/次版本与 App 自身版本号无关，
-    // 两边各自独立递增（见 README「版本与兼容」）。
-    return version.split('.').first == '1';
+  bool _canLogin() {
+    final error = _nativeCompatibilityError;
+    if (error == null) return true;
+    _fail(error);
+    return false;
   }
 
   Future<void> autoConnectIfNeeded() async {
+    if (!_canLogin()) return;
     if (_autoConnecting || _snapshot.isBusy || _snapshot.isOnline) return;
     final account = activeAccount;
     if (account == null || !account.autoConnect) return;
@@ -186,6 +195,7 @@ class AppController extends ChangeNotifier {
   /// 唤起系统 Wi-Fi 面板让用户点一下，然后轮询 SSID，一旦连上目标 Wi-Fi
   /// 就自动继续登录 —— 对用户来说仍然是「点一次登录」。
   Future<void> loginWithWifi() async {
+    if (!_canLogin()) return;
     final account = activeAccount;
     if (account == null) {
       _fail('请先添加账号');
@@ -196,9 +206,7 @@ class AppController extends ChangeNotifier {
       return;
     }
     final target = account.wifiSsid.trim();
-    if (target.isEmpty ||
-        !account.wifiConnectOnLogin ||
-        !WifiShell.supported) {
+    if (target.isEmpty || !account.wifiConnectOnLogin || !WifiShell.supported) {
       await login();
       return;
     }
@@ -270,6 +278,7 @@ class AppController extends ChangeNotifier {
     try {
       final previous = _wifi;
       final next = await WifiShell.status();
+      if (_disposed) return;
       _wifi = next;
       _onWifiUpdated(previous, next);
     } finally {
@@ -361,13 +370,21 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> login() async {
+    if (_disposed) return;
+    if (!_canLogin()) return;
     // 登录是同步阻塞的原生调用，重复派发会连做两次 term+auth，票据也会被用掉。
     if (_loginInFlight) return;
     _loginInFlight = true;
     try {
       await _login();
+    } catch (error) {
+      if (_snapshot.isBusy) {
+        _snapshot = const SessionSnapshot(phase: SessionPhase.error);
+      }
+      _fail('登录失败：$error');
     } finally {
       _loginInFlight = false;
+      if (!_disposed) notifyListeners();
     }
   }
 
@@ -383,8 +400,15 @@ class AppController extends ChangeNotifier {
       return;
     }
 
+    _snapshot = const SessionSnapshot(
+      phase: SessionPhase.connecting,
+      message: '正在读取凭据',
+    );
+    notifyListeners();
     final password = await credentials.read(account.account) ?? '';
+    if (_disposed) return;
     if (password.isEmpty) {
+      _snapshot = const SessionSnapshot(phase: SessionPhase.error);
       _fail('账号 ${account.account} 没有保存密码，请重新输入');
       return;
     }
@@ -425,12 +449,20 @@ class AppController extends ChangeNotifier {
 
       final mac = result['mac']?.toString() ?? '';
       if (mac.isNotEmpty && mac != _config.savedMac && !Platform.isWindows) {
-        _config = _config.copyWith(savedMac: mac);
-        await configRepository.save(_config);
+        final nextConfig = _config.copyWith(savedMac: mac);
+        try {
+          await configRepository.save(nextConfig);
+          _config = nextConfig;
+        } catch (error) {
+          logs.add('登录成功，但保存 MAC 失败：$error', level: LogLevel.warn);
+        }
       }
       logs.add('登录成功');
       if (account.keepEnabled) await startKeep();
     } catch (error) {
+      if (_snapshot.isBusy) {
+        _snapshot = const SessionSnapshot(phase: SessionPhase.error);
+      }
       _fail('登录失败：$error');
     }
   }
@@ -453,7 +485,14 @@ class AppController extends ChangeNotifier {
     _lastError = '';
     notifyListeners();
     try {
-      await _host.send('disconnect');
+      final result = await _host.send('disconnect');
+      if (result['ok'] != true) {
+        _fail(
+          '本地会话已关闭，但服务器注销失败：'
+          '${result['errorMessage'] ?? result['errorCode'] ?? '未知错误'}',
+        );
+        return;
+      }
       logs.add('已断开连接');
     } catch (error) {
       _fail('断开失败：$error');
@@ -548,13 +587,12 @@ class AppController extends ChangeNotifier {
     } else {
       list.add(profile);
     }
-    _config = _config.copyWith(
+    final nextConfig = _config.copyWith(
       accounts: list,
-      activeAccountId: _config.activeAccountId.isEmpty
-          ? profile.id
-          : _config.activeAccountId,
+      activeAccountId: activeAccount?.id ?? profile.id,
     );
-    await configRepository.save(_config);
+    await configRepository.save(nextConfig);
+    _config = nextConfig;
     logs.add('已保存账号：${profile.account}');
     _restartWifiWatch();
     notifyListeners();
@@ -569,28 +607,35 @@ class AppController extends ChangeNotifier {
     final target = _config.accounts.where((a) => a.id == id).firstOrNull;
     if (target == null) return;
     final list = _config.accounts.where((a) => a.id != id).toList();
-    _config = _config.copyWith(
+    final nextConfig = _config.copyWith(
       accounts: list,
       activeAccountId: list.isEmpty
           ? ''
           : (_config.activeAccountId == id ? list.first.id : null),
     );
-    await configRepository.save(_config);
-    await credentials.delete(target.account);
+    await configRepository.save(nextConfig);
+    _config = nextConfig;
+    if (!list.any((profile) => profile.account == target.account)) {
+      await credentials.delete(target.account);
+    }
     _restartWifiWatch();
     notifyListeners();
   }
 
   /// 切换活动账号。已连接时会先断开（UI 会先弹确认）。
   Future<void> setActiveAccount(String id) async {
-    if (_snapshot.isBusy) {
+    if (_snapshot.isBusy || _loginInFlight) {
       _fail('操作进行中，请稍后再切换账号');
       return;
     }
     if (_config.activeAccountId == id) return;
-    if (_snapshot.isOnline) await logout();
-    _config = _config.copyWith(activeAccountId: id);
-    await configRepository.save(_config);
+    if (_snapshot.isOnline) {
+      await logout();
+      if (_snapshot.isOnline || _snapshot.isBusy) return;
+    }
+    final nextConfig = _config.copyWith(activeAccountId: id);
+    await configRepository.save(nextConfig);
+    _config = nextConfig;
     // 换了账号就换了目标 Wi-Fi，允许在新目标上重新触发一次自动登录。
     _autoLoginSsidDone = '';
     _restartWifiWatch();
@@ -602,9 +647,7 @@ class AppController extends ChangeNotifier {
   Future<void> setSessionMode(int mode) async {
     if (_snapshot.isBusy || _snapshot.isOnline) {
       _fail(
-        _snapshot.isOnline
-            ? '已连接，请先断开再修改客户端模式'
-            : '连接进行中，请等本次操作结束后再切换客户端模式',
+        _snapshot.isOnline ? '已连接，请先断开再修改客户端模式' : '连接进行中，请等本次操作结束后再切换客户端模式',
       );
       return;
     }
@@ -633,25 +676,27 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> updateUi(UiConfig ui) async {
-    _config = _config.copyWith(ui: ui);
+    final nextConfig = _config.copyWith(ui: ui);
+    await configRepository.save(nextConfig);
+    _config = nextConfig;
     logs.minLevel = LogLevelX.parse(ui.logLevel, fallback: logs.minLevel);
-    await configRepository.save(_config);
     notifyListeners();
   }
 
   /// 切换日志页的显示级别并持久化到 `ui.logLevel`。
   Future<void> setLogLevel(LogLevel level) async {
-    logs.minLevel = level;
     await updateUi(_config.ui.copyWith(logLevel: level.name));
   }
 
   void _onState(SessionSnapshot state) {
+    if (_disposed) return;
     _snapshot = state;
     if (state.errorText.isNotEmpty) _lastError = state.errorText;
     notifyListeners();
   }
 
   void _onEvent(SessionEvent event) {
+    if (_disposed) return;
     if (event.text.isEmpty) return;
     final level = switch (event.kind) {
       EsfEventKind.error => LogLevel.error,
@@ -662,6 +707,7 @@ class AppController extends ChangeNotifier {
   }
 
   void _fail(String message) {
+    if (_disposed) return;
     _lastError = message;
     logs.add(message, level: LogLevel.error);
     notifyListeners();
@@ -672,10 +718,19 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> shutdown() => _shutdownFuture ??= _shutdown();
+
+  Future<void> _shutdown() async {
+    _disposed = true;
+    _wifiTimer?.cancel();
+    await _stateSubscription?.cancel();
+    await _eventSubscription?.cancel();
+    await _host.dispose();
+  }
+
   @override
   void dispose() {
-    _wifiTimer?.cancel();
-    unawaited(_host.dispose());
+    unawaited(shutdown());
     super.dispose();
   }
 }

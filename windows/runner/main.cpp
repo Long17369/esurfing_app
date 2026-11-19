@@ -18,7 +18,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   HANDLE instance_mutex = ::CreateMutexW(
       nullptr, FALSE, L"EsurfingApp.SingleInstance.v1");
   if (instance_mutex != nullptr && ::GetLastError() == ERROR_ALREADY_EXISTS) {
-    HWND existing = ::FindWindowW(L"FLUTTER_RUNNER_WIN32_WINDOW", nullptr);
+    HWND existing = ::FindWindowW(Win32Window::kWindowClassName, nullptr);
     if (existing != nullptr) {
       ::ShowWindow(existing, SW_RESTORE);
       ::SetForegroundWindow(existing);

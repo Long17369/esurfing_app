@@ -1,6 +1,46 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
+/// Schedules UI removal once per background interval, independently of sessions.
+class AndroidBackgroundUiLifecycle {
+  AndroidBackgroundUiLifecycle({required this.delay, required this.destroyUi});
+
+  final Duration? Function() delay;
+  final VoidCallback destroyUi;
+  Timer? _timer;
+  bool _background = false;
+
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+      case AppLifecycleState.detached:
+        _background = false;
+        _timer?.cancel();
+        _timer = null;
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        if (_background) return;
+        _background = true;
+        final timeout = delay();
+        if (timeout == null || timeout <= Duration.zero) return;
+        _timer = Timer(timeout, () {
+          _timer = null;
+          if (_background) destroyUi();
+        });
+      case AppLifecycleState.inactive:
+        break;
+    }
+  }
+
+  void dispose() {
+    _background = false;
+    _timer?.cancel();
+    _timer = null;
+  }
+}
 
 /// Android 壳的能力：通知权限、电池优化白名单、前台服务。
 /// 首版不接 Shizuku，只保留设置项占位。

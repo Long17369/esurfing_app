@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:isolate';
 
@@ -11,21 +12,22 @@ import 'native_text.dart';
 /// 后台会话宿主。UI isolate 只发命令，所有阻塞的 `esf_*` 调用都在这里串行执行。
 void sessionHostMain(List<Object?> args) {
   final uiPort = args.first as SendPort;
-  _SessionHost(uiPort).start();
+  SessionHost(uiPort).start();
 }
 
-class _SessionHost {
-  _SessionHost(this._ui);
+class SessionHost {
+  SessionHost(this._ui, {this._bindings});
 
   final SendPort _ui;
   final ReceivePort _rx = ReceivePort();
 
   EsfBindings? _bindings;
   Pointer<EsfClient>? _client;
-  NativeCallable<EsfEventCbNative>? _eventCallable;
   NativeCallable<EsfOwnedEventCbNative>? _ownedEventCallable;
+  Completer<void>? _eventsDrained;
   bool _online = false;
   String _lastMac = '';
+
   /// 本次会话的保活节奏（秒）。只从 connect 参数来，不看全局配置。
   double _keepInterval = 0;
 
@@ -36,19 +38,27 @@ class _SessionHost {
 
   EsfBindings get _b => _bindings ??= EsfBindings.instance;
 
-  void _onMessage(Object? message) {
+  Future<void> _onMessage(Object? message) async {
     if (message is! Map) return;
     final id = message['id'] as int?;
     if (id == null) return;
     final type = message['type'] as String? ?? '';
     final payload = (message['payload'] as Map?) ?? const {};
     try {
-      final data = _handle(type, payload);
-      _ui.send({'type': 'reply', 'id': id, 'ok': true, 'data': data});
-      if (type == 'dispose') {
-        _rx.close();
+      final Map<String, Object?> data;
+      try {
+        data = _handle(type, payload);
+      } finally {
+        if (type == 'dispose') {
+          await _closeCallbacks();
+          _rx.close();
+        }
       }
+      _ui.send({'type': 'reply', 'id': id, 'ok': true, 'data': data});
     } catch (error) {
+      if (type == 'connect' || type == 'disconnect' || type == 'dispose') {
+        _sendState(SessionPhase.error, '会话操作失败：$error', errorText: '$error');
+      }
       _ui.send({
         'type': 'reply',
         'id': id,
@@ -61,7 +71,10 @@ class _SessionHost {
   Map<String, Object?> _handle(String type, Map payload) {
     switch (type) {
       case 'version':
-        return {'version': _b.version};
+        return {
+          'version': _b.version,
+          'compatibilityError': _b.sessionCompatibilityError,
+        };
       case 'connect':
         return _connect(SessionParams.fromMap(payload));
       case 'disconnect':
@@ -74,11 +87,11 @@ class _SessionHost {
         final client = _client;
         return {'running': client == null ? false : _b.keepRunning(client)};
       case 'dispose':
-        _disconnect();
-        _eventCallable?.close();
-        _eventCallable = null;
-        _ownedEventCallable?.close();
-        _ownedEventCallable = null;
+        try {
+          _disconnect();
+        } finally {
+          _teardownClient();
+        }
         return const {};
       default:
         throw StateError('未知命令：$type');
@@ -86,6 +99,7 @@ class _SessionHost {
   }
 
   Map<String, Object?> _connect(SessionParams params) {
+    _b.requireSessionCompatibility();
     if (params.account.isEmpty || params.password.isEmpty) {
       throw StateError('账号或密码为空');
     }
@@ -97,13 +111,13 @@ class _SessionHost {
       throw StateError('esf_create 失败（内存不足）');
     }
     _client = client;
-    _installCallbacks(client);
-    _keepInterval = params.keepInterval;
-
-    final options = _makeOptions(preTerm: params.preTerm, keep: -1);
+    Pointer<EsfOptions> options = nullptr;
     final codeOut = calloc<Pointer<Utf8>>();
     final messageOut = calloc<Pointer<Utf8>>();
     try {
+      _installCallbacks(client);
+      _keepInterval = params.keepInterval;
+      options = _makeOptions(preTerm: params.preTerm, keep: -1);
       _check(_b.setAccount(client, params.account, params.password), '设置账号');
       if (params.clientId.isEmpty) {
         throw StateError('Client-ID 为空，拒绝连接（会导致设备互相踢下线）');
@@ -136,6 +150,7 @@ class _SessionHost {
           errorCode: code,
           errorText: detail,
         );
+        _teardownClient();
         return {
           'ok': false,
           'status': rc,
@@ -154,6 +169,8 @@ class _SessionHost {
           _lastMac = _b.takeString(macOut);
         }
       } finally {
+        _b.free(ipOut.value);
+        _b.free(macOut.value);
         calloc.free(ipOut);
         calloc.free(macOut);
       }
@@ -170,7 +187,9 @@ class _SessionHost {
       _teardownClient();
       rethrow;
     } finally {
-      calloc.free(options);
+      _b.free(codeOut.value);
+      _b.free(messageOut.value);
+      if (options != nullptr) calloc.free(options);
       calloc.free(codeOut);
       calloc.free(messageOut);
     }
@@ -184,15 +203,14 @@ class _SessionHost {
     }
     _sendState(SessionPhase.disconnecting, '正在断开');
     _stopKeepInternal(client);
-    final options = _makeOptions(preTerm: false, keep: -1);
+    Pointer<EsfOptions> options = nullptr;
     final codeOut = calloc<Pointer<Utf8>>();
     final messageOut = calloc<Pointer<Utf8>>();
     try {
+      options = _makeOptions(preTerm: false, keep: -1);
       final rc = _b.logout(client, options, codeOut, messageOut);
       final code = _b.takeString(codeOut);
       final message = _b.takeString(messageOut);
-      _online = false;
-      _teardownClient();
       _sendState(SessionPhase.idle, '已断开');
       return {
         'ok': rc == EsfStatus.ok,
@@ -201,7 +219,10 @@ class _SessionHost {
         'errorMessage': message,
       };
     } finally {
-      calloc.free(options);
+      _teardownClient();
+      _b.free(codeOut.value);
+      _b.free(messageOut.value);
+      if (options != nullptr) calloc.free(options);
       calloc.free(codeOut);
       calloc.free(messageOut);
     }
@@ -243,37 +264,31 @@ class _SessionHost {
 
   Pointer<EsfOptions> _makeOptions({required bool preTerm, required int keep}) {
     final options = calloc<EsfOptions>();
-    _b.optionsInit(options);
-    options.ref.preTerm = preTerm ? 1 : 0;
-    options.ref.keep = keep;
-    // 0 表示让核心用自己的内置默认值（10s），所以只在用户给了正数时覆盖。
-    if (_keepInterval > 0) {
-      options.ref.keepInterval = _keepInterval;
+    try {
+      _b.optionsInit(options);
+      options.ref.preTerm = preTerm ? 1 : 0;
+      options.ref.keep = keep;
+      // 0 表示让核心用自己的内置默认值（10s），所以只在用户给了正数时覆盖。
+      if (_keepInterval > 0) {
+        options.ref.keepInterval = _keepInterval;
+      }
+      return options;
+    } catch (_) {
+      calloc.free(options);
+      rethrow;
     }
-    return options;
   }
 
   void _installCallbacks(Pointer<EsfClient> client) {
-    // v1.2.0 起优先用「所有权转移」版：text 由原生库 malloc，宿主读完
-    // esf_free。这样 NativeCallable.listener 的异步投递才不会读到悬空指针。
-    final setOwned = _b.setOwnedEventCb;
-    if (setOwned != null) {
-      _ownedEventCallable ??= NativeCallable<EsfOwnedEventCbNative>.listener(
-        _onOwnedNativeEvent,
-      );
-    } else {
-      // 旧库回退：text 仅在回调期间有效，只能尽量容错地读。
-      _eventCallable ??= NativeCallable<EsfEventCbNative>.listener(
-        _onNativeEvent,
-      );
-    }
+    final setOwned = _b.setOwnedEventCb!;
+    _ownedEventCallable ??= NativeCallable<EsfOwnedEventCbNative>.listener(
+      _onOwnedNativeEvent,
+    );
 
     final callbacks = calloc<EsfCallbacks>();
     try {
       callbacks.ref.user = nullptr;
-      callbacks.ref.onEvent = setOwned != null
-          ? nullptr
-          : _eventCallable!.nativeFunction;
+      callbacks.ref.onEvent = nullptr;
       callbacks.ref.onAsk = nullptr;
       callbacks.ref.onCancel = nullptr;
       _b.setCallbacks(client, callbacks);
@@ -281,32 +296,37 @@ class _SessionHost {
       calloc.free(callbacks);
     }
 
-    if (setOwned != null) {
-      setOwned(client, _ownedEventCallable!.nativeFunction, nullptr);
-    }
+    setOwned(client, _ownedEventCallable!.nativeFunction, nullptr);
   }
 
   void _onOwnedNativeEvent(Pointer<Void> user, int kind, Pointer<Utf8> text) {
+    if (kind == -1 && text == nullptr) {
+      _eventsDrained?.complete();
+      return;
+    }
     try {
-      _ui.send({
-        'type': 'event',
-        'kind': kind,
-        'text': decodeNativeUtf8(text),
-      });
+      _ui.send({'type': 'event', 'kind': kind, 'text': decodeNativeUtf8(text)});
     } finally {
       // 所有权在宿主这边，漏了就是每条事件泄漏一次。
       _b.free(text);
     }
   }
 
-  void _onNativeEvent(Pointer<Void> user, int kind, Pointer<Utf8> text) {
-    // 旧契约（< 1.2.0）：text 只在回调期间有效，而 NativeCallable.listener
-    // 是异步投递，读取时必须容错（详见 decodeNativeUtf8 的注释）。
-    _ui.send({
-      'type': 'event',
-      'kind': kind,
-      'text': decodeNativeUtf8(text),
-    });
+  Future<void> _closeCallbacks() async {
+    final callable = _ownedEventCallable;
+    if (callable == null) return;
+    // destroy 已 join 生产者。投递同一 trampoline 的哨兵，等待此前排队的
+    // owned 文本全部释放后才能关闭 listener。
+    _eventsDrained = Completer<void>();
+    callable.nativeFunction.asFunction<EsfOwnedEventCbDart>()(
+      nullptr,
+      -1,
+      nullptr,
+    );
+    await _eventsDrained!.future;
+    callable.close();
+    _ownedEventCallable = null;
+    _eventsDrained = null;
   }
 
   void _check(int rc, String action) {

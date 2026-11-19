@@ -1,0 +1,95 @@
+name: macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.47.7'
+  ESURFING_C_REF: '6c81d4fec635f6bd44c61723d2d2b5080c3306bd'
+
+jobs:
+  macos:
+    name: macOS universal
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Verify macOS SDK
+        run: |
+          xcodebuild -version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          test "${sdk%%.*}" -ge 26
+
+      - name: Checkout exact backend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ESURFING_C_REPO || format('{0}/esurfing_c', github.repository_owner) }}
+          ref: ${{ env.ESURFING_C_REF }}
+          path: esurfing_c
+          token: ${{ secrets.ESURFING_C_TOKEN || secrets.PAT_TOKEN }}
+          ssh-key: ${{ secrets.ESURFING_C_DEPLOY_KEY }}
+          submodules: recursive
+
+      - name: Validate backend checkout
+        run: test "$(git -C esurfing_c rev-parse HEAD)" = "$ESURFING_C_REF"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Use CocoaPods for macOS plugins
+        run: flutter config --no-enable-swift-package-manager
+
+      - name: Restore universal macOS backend
+        id: native
+        uses: actions/cache@v4
+        with:
+          path: packages/esurfing_native/macos
+          key: esf-macos-${{ runner.os }}-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
+
+      - name: Build universal backend
+        if: steps.native.outputs.cache-hit != 'true'
+        env:
+          ESURFING_C_DIR: ${{ github.workspace }}/esurfing_c
+          ESURFING_BUILD_BASE: ${{ runner.temp }}/esf-build
+        run: bash tool/build_native.sh macos
+
+      - name: Validate universal macOS backend
+        run: |
+          test -f packages/esurfing_native/macos/libesurfing.dylib
+          test "$(tr -d '\r\n' < packages/esurfing_native/macos/backend-sha.txt)" = "$ESURFING_C_REF"
+
+      - name: Analyze and test
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: macOS plugin and desktop integration
+        env:
+          ARCHS: x86_64
+          ONLY_ACTIVE_ARCH: YES
+        run: flutter test integration_test/macos_desktop_test.dart -d macos
+
+      - name: Verify and package
+        run: bash tool/package_macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*.zip
+          if-no-files-found: error

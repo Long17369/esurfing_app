@@ -23,9 +23,8 @@ void main() {
     }
   });
 
-  test('decodeNativeUtf8 对悬空指针里的非法字节不抛异常', () {
-    // 0xE4 是中文首字节，后面跟着 ASCII 0x42 —— 典型的缓冲被复用后
-    // 的残缺序列，严格解码会抛 FormatException: Unexpected extension byte。
+  test('decodeNativeUtf8 对有效缓冲中的非法字节容错', () {
+    // 0xE4 后面跟着 ASCII 0x42，构成不完整的 UTF-8 序列。
     final ptr = _alloc(const [0x41, 0x42, 0xE4, 0x42, 0x43]);
     try {
       final text = decodeNativeUtf8(ptr);
