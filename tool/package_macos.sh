@@ -50,6 +50,14 @@ if grep -q 'com.apple.security.get-task-allow' <<<"$entitlement_dump"; then
   echo "error: release app still contains get-task-allow" >&2
   exit 1
 fi
+if grep -q 'keychain-access-groups' <<<"$entitlement_dump"; then
+  echo "error: release app contains an unsupported keychain access group" >&2
+  exit 1
+fi
+if grep -q 'com.apple.security.cs.allow-jit' <<<"$entitlement_dump"; then
+  echo "error: release app still contains allow-jit" >&2
+  exit 1
+fi
 codesign -dvv "$app" 2>&1 | grep -q 'Signature=adhoc' || {
   echo "error: expected an explicitly ad-hoc test signature" >&2
   exit 1

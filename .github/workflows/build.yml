@@ -39,6 +39,11 @@ jobs:
           ref="$(tr -d '\r\n' < tool/esurfing_c.ref)"
           [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Expected a full backend commit SHA"; exit 1; }
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Validate build number
+        run: |
+          build="$(sed -n 's/^version: .*+\([0-9][0-9]*\)$/\1/p' pubspec.yaml)"
+          test -n "$build" || { echo "::error::pubspec version must include a numeric build number"; exit 1; }
+          echo "App build number: $build"
 
   # ── 静态检查与单测（纯 Dart，跑一份就够）
   check:

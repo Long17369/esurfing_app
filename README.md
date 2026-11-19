@@ -22,7 +22,7 @@ Developer ID 签名或 Apple 公证，下载后可能被 Gatekeeper 阻止直接
 - 在线锁定：连接中/已连接/保活中时，当前账号的配置与客户端模式不可修改，
   需先在主页断开；已连接时切换账号会先弹确认再断开
 - Windows：托盘常驻、关闭到托盘、开机自启、启动最小化、单实例
-- macOS：菜单栏托盘、关闭到托盘、登录时自启动、启动最小化；凭据通过 Keychain 保存
+- macOS：菜单栏托盘、关闭到托盘、登录时自启动、启动最小化；凭据通过当前 App 的默认 Keychain 保存，不跨 App 共享
 - Windows：效率模式（EcoQoS，Win10 1709+）——窗口隐藏到托盘时把进程标记成
   后台任务，减少 CPU 占用；设置页可关（`ui.efficiencyMode`，默认开）
 - Android：前台服务常驻通知、开机自启、电池优化白名单引导
@@ -234,7 +234,7 @@ App 与 `esurfing_c` **各自独立版本号**，不要求一致：
 
 | 项目 | 位置 | 当前值 |
 |---|---|---|
-| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+8` |
+| App 版本 | `pubspec.yaml` 的 `version: <semver>+<build>` | `1.4.0+9` |
 | 原生库 ABI | `esf_version()` 返回的 `1.2.1` | 校验主版本及安全事件接口能力 |
 
 - App 版本只在自身有改动时递增（功能 → 次版本，修复 → 补丁号，每次发版 `+build` 加 1）；
