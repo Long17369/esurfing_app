@@ -3,11 +3,13 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// 密码只进系统凭据库：
 /// - Windows：DPAPI（flutter_secure_storage 的 win32 实现）；
 /// - Android：Keystore + EncryptedSharedPreferences；
-/// - macOS：Keychain（保留沙箱，使用应用默认访问组，不跨应用共享）；
+/// - macOS：登录钥匙串（支持本地 ad-hoc 签名）；
 /// - iOS：尚未交付工程。
 class CredentialStore {
   CredentialStore([FlutterSecureStorage? storage])
-    : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? const FlutterSecureStorage(
+        mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+      );
 
   final FlutterSecureStorage _storage;
 
