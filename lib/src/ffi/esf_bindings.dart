@@ -16,6 +16,8 @@ import 'native_text.dart';
 class EsfBindings {
   EsfBindings._(this._lib);
 
+  EsfBindings.fromLibrary(DynamicLibrary library) : _lib = library;
+
   final DynamicLibrary _lib;
 
   static EsfBindings? _instance;
@@ -67,6 +69,7 @@ class EsfBindings {
   static DynamicLibrary _openBundledAppleLibrary(String name) {
     final exe = File(Platform.resolvedExecutable);
     final candidates = [
+      exe.parent.uri.resolve('../Frameworks/$name').toFilePath(),
       exe.parent.uri.resolve('Frameworks/$name').toFilePath(),
       exe.parent.uri.resolve(name).toFilePath(),
     ];
@@ -80,6 +83,24 @@ class EsfBindings {
 
   String get version => decodeNativeUtf8(_esfVersion());
 
+  static String? compatibilityError(String version, bool ownedEvents) {
+    if (version.split('.').first != '1') {
+      return '原生后端 ABI 版本不兼容（$version），请升级原生库并重新构建应用。';
+    }
+    if (!ownedEvents) {
+      return '原生后端缺少安全事件接口 esf_set_owned_event_cb，请升级至 esurfing_c 1.2.0 或更高版本并重新构建应用。';
+    }
+    return null;
+  }
+
+  String? get sessionCompatibilityError =>
+      compatibilityError(version, setOwnedEventCb != null);
+
+  void requireSessionCompatibility() {
+    final error = sessionCompatibilityError;
+    if (error != null) throw StateError(error);
+  }
+
   late final EsfCreateDart _esfCreate = _lib
       .lookupFunction<EsfCreateNative, EsfCreateDart>('esf_create');
   late final EsfDestroyDart _esfDestroy = _lib
@@ -88,8 +109,9 @@ class EsfBindings {
       .lookupFunction<EsfSetCallbacksNative, EsfSetCallbacksDart>(
         'esf_set_callbacks',
       );
+
   /// `esf_set_owned_event_cb` 是 v1.2.0 新增的；旧库没有这个符号。
-  /// 这里做一次探测，返回 null 表示宿主必须回退到旧的 `on_event` 契约。
+  /// 返回 null 时必须拒绝会话，不能异步读取旧回调的借用指针。
   EsfSetOwnedEventCbDart? get setOwnedEventCb {
     if (_ownedEventProbed) return _ownedEventCb;
     _ownedEventProbed = true;
@@ -266,10 +288,12 @@ class EsfBindings {
   String takeString(Pointer<Pointer<Utf8>> out) {
     final ptr = out.value;
     if (ptr == nullptr) return '';
-    final text = decodeNativeUtf8(ptr);
-    _esfFree(ptr);
-    out.value = nullptr;
-    return text;
+    try {
+      return decodeNativeUtf8(ptr);
+    } finally {
+      _esfFree(ptr);
+      out.value = nullptr;
+    }
   }
 
   void free(Pointer<Utf8> ptr) {

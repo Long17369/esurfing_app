@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'src/app.dart';
+import 'src/data/log_repository.dart';
 import 'src/platform/android_shell.dart';
 import 'src/platform/desktop_shell.dart';
 import 'src/state/app_controller.dart';
@@ -19,7 +20,13 @@ Future<void> main() async {
   }
 
   final desktopShell = DesktopShell(controller);
-  await desktopShell.init();
+  try {
+    await desktopShell.init();
+  } catch (error) {
+    controller.logs.add('桌面初始化失败：$error', level: LogLevel.error);
+    // A partially initialized tray must not make the only window unreachable.
+    if (DesktopShell.supported) await desktopShell.showWindow();
+  }
   if (Platform.isAndroid) {
     await AndroidShell.requestNotificationPermission();
   }

@@ -58,6 +58,8 @@ app.*.map.json
 # 本地编出来的原生库（由 tool/build_native.sh 生成，不入库）
 /packages/esurfing_native/windows/*.dll
 /packages/esurfing_native/windows/*.dll.a
+/packages/esurfing_native/macos/*.dylib
+/packages/esurfing_native/macos/backend-sha.txt
 
 # Gradle 根目录产物
 /android/build/

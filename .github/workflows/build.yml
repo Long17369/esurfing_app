@@ -4,10 +4,16 @@ name: build
 on:
   push:
     # ci/** 分支用来单独验证 workflow 改动，验证完再并回 dev。
-    branches: [dev, main, 'ci/**']
+    branches: [dev, main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      macos_only:
+        description: 'Run only the macOS job'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,17 +24,39 @@ concurrency:
 
 env:
   FLUTTER_VERSION: '3.47.7'
-  # 绑定的 C 库版本：必须是 tag。App 内置的 jniLibs / DLL 都来自这一版。
-  ESURFING_C_REF: ${{ vars.ESURFING_C_REF || 'v1.2.1' }}
 
 jobs:
+  source:
+    name: resolve native source
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ref
+        name: Require exact backend commit
+        run: |
+          ref="$(tr -d '\r\n' < tool/esurfing_c.ref)"
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Expected a full backend commit SHA"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Validate build number
+        run: |
+          build="$(sed -n 's/^version: .*+\([0-9][0-9]*\)$/\1/p' pubspec.yaml)"
+          test -n "$build" || { echo "::error::pubspec version must include a numeric build number"; exit 1; }
+          echo "App build number: $build"
+
   # ── 静态检查与单测（纯 Dart，跑一份就够）
   check:
     name: analyze & test
+    if: ${{ inputs.macos_only != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Install Dart native hook compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libgtk-3-dev libx11-dev libxi-dev pkg-config
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -41,22 +69,26 @@ jobs:
   # ── Windows x64：MinGW 编 esurfing.dll → flutter build windows → zip
   windows:
     name: windows x64
+    if: ${{ inputs.macos_only != true }}
+    needs: source
     runs-on: windows-latest
+    env:
+      ESURFING_C_REF: ${{ needs.source.outputs.ref }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      # 原生库只在 C 库 tag 或构建脚本变化时重编，其余命中缓存直接跳过整套工具链。
+      # 精确提交与脚本共同决定原生缓存。
       - name: 还原 esurfing.dll 缓存
         id: native
         uses: actions/cache@v4
         with:
           path: packages/esurfing_native/windows
-          key: esf-dll-${{ runner.os }}-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
+          key: esf-dll-${{ runner.os }}-${{ vars.ESURFING_C_REPO || format('{0}/esurfing_c', github.repository_owner) }}-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
 
       # 私有库鉴权：PAT 需要 Contents:Read-only；
-      # 想用 Deploy Key 就把 ESURFING_C_REPO 写成 git@github.com:<owner>/esurfing_c.git。
-      - name: 拉取 esurfing_c（绑定 tag）
+      # Deploy Key 由 checkout 的 ssh-key 参数启用，repository 始终填 owner/repo。
+      - name: 拉取 esurfing_c（精确提交）
         if: steps.native.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
@@ -65,6 +97,12 @@ jobs:
           path: esurfing_c
           token: ${{ secrets.ESURFING_C_TOKEN || secrets.PAT_TOKEN }}
           ssh-key: ${{ secrets.ESURFING_C_DEPLOY_KEY }}
+          submodules: recursive
+
+      - name: Validate backend checkout
+        if: steps.native.outputs.cache-hit != 'true'
+        shell: bash
+        run: test "$(git -C esurfing_c rev-parse HEAD)" = "$ESURFING_C_REF"
 
       # esurfing_c 是 C++23 + MinGW 专用链接参数，不能拿 MSVC 编，所以用 MSYS2 工具链。
       - name: 安装 MSYS2 MinGW 工具链
@@ -99,6 +137,7 @@ jobs:
           flutter pub get
           flutter build windows --release
           $out = 'build\windows\x64\runner\Release'
+          @("app_sha=$env:GITHUB_SHA", "backend_sha=$env:ESURFING_C_REF", "architecture=x86_64", "mode=release", "signing=unsigned") | Set-Content "$out\build-source.txt"
           $version = (Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$').Matches.Groups[1].Value
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive -Path "$out\*" -DestinationPath "dist\esurfing-app-windows-x64-$version.zip" -Force
@@ -112,7 +151,11 @@ jobs:
   # ── Android：用同一个 C 库版本编三个 ABI 的 so，再打 APK
   android:
     name: android apk
+    if: ${{ inputs.macos_only != true }}
+    needs: source
     runs-on: ubuntu-latest
+    env:
+      ESURFING_C_REF: ${{ needs.source.outputs.ref }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -139,9 +182,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: android/app/src/main/jniLibs
-          key: esf-so-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
+          key: esf-so-${{ vars.ESURFING_C_REPO || format('{0}/esurfing_c', github.repository_owner) }}-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
 
-      - name: 拉取 esurfing_c（绑定 tag）
+      - name: 拉取 esurfing_c（精确提交）
         if: steps.native.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
@@ -150,6 +193,11 @@ jobs:
           path: esurfing_c
           token: ${{ secrets.ESURFING_C_TOKEN || secrets.PAT_TOKEN }}
           ssh-key: ${{ secrets.ESURFING_C_DEPLOY_KEY }}
+          submodules: recursive
+
+      - name: Validate backend checkout
+        if: steps.native.outputs.cache-hit != 'true'
+        run: test "$(git -C esurfing_c rev-parse HEAD)" = "$ESURFING_C_REF"
 
       - uses: actions/setup-java@v4
         with:
@@ -214,22 +262,112 @@ jobs:
           version="$(sed -n 's/^version: *//p' pubspec.yaml)"
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk "dist/esurfing-app-android-$version.apk"
+          printf 'app_sha=%s\nbackend_sha=%s\narchitecture=arm64-v8a,armeabi-v7a,x86_64\nmode=release\n' "$GITHUB_SHA" "$ESURFING_C_REF" > dist/android-build-source.txt
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
-          "$apksigner" verify --print-certs "dist/esurfing-app-android-$version.apk" | head -4
+          "$apksigner" verify --print-certs "dist/esurfing-app-android-$version.apk" > dist/android-signing.txt
+          head -4 dist/android-signing.txt
           ls -l dist/
           df -h / | tail -1
+
+      - name: Android lint and behavior tests
+        working-directory: android
+        run: ./gradlew :app:lintRelease :app:testDebugUnitTest --console=plain --max-workers=2
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-check-reports
+          path: |
+            build/app/reports/lint-results-*.*
+            build/app/reports/tests/testDebugUnitTest/
+            build/app/test-results/testDebugUnitTest/
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: dist/*.apk
+          path: |
+            dist/*.apk
+            dist/android-build-source.txt
+            dist/android-signing.txt
           if-no-files-found: error
 
-  # ── 打 tag 时把两个产物挂到 Release
+  macos:
+    name: macOS universal
+    needs: source
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ESURFING_C_REF: ${{ needs.source.outputs.ref }}
+      ESURFING_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Verify macOS SDK
+        run: |
+          xcodebuild -version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          test "${sdk%%.*}" -ge 26 || { echo "::error::connectivity_plus requires the macOS 26 SDK"; exit 1; }
+      - name: Checkout exact backend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.ESURFING_C_REPO || format('{0}/esurfing_c', github.repository_owner) }}
+          ref: ${{ env.ESURFING_C_REF }}
+          path: esurfing_c
+          token: ${{ secrets.ESURFING_C_TOKEN || secrets.PAT_TOKEN }}
+          ssh-key: ${{ secrets.ESURFING_C_DEPLOY_KEY }}
+          submodules: recursive
+      - name: Validate backend checkout
+        run: test "$(git -C esurfing_c rev-parse HEAD)" = "$ESURFING_C_REF"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Use CocoaPods for macOS plugins
+        run: flutter config --no-enable-swift-package-manager
+      - name: Restore universal macOS backend
+        id: native
+        uses: actions/cache@v4
+        with:
+          path: packages/esurfing_native/macos
+          key: esf-macos-${{ runner.os }}-${{ env.ESURFING_C_REF }}-${{ hashFiles('tool/build_native.sh') }}
+      - name: Build universal backend
+        env:
+          ESURFING_C_DIR: ${{ github.workspace }}/esurfing_c
+          ESURFING_BUILD_BASE: ${{ runner.temp }}/esf-build
+        if: steps.native.outputs.cache-hit != 'true'
+        run: bash tool/build_native.sh macos
+      - name: Validate universal macOS backend
+        run: |
+          test -f packages/esurfing_native/macos/libesurfing.dylib
+          test "$(tr -d '\r\n' < packages/esurfing_native/macos/backend-sha.txt)" = "$ESURFING_C_REF"
+      - name: Analyze and test on macOS
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: macOS plugin and desktop integration
+        continue-on-error: true
+        env:
+          ARCHS: arm64
+          ONLY_ACTIVE_ARCH: YES
+        run: flutter test integration_test/macos_desktop_test.dart -d macos
+      - name: Verify and package
+        run: bash tool/package_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*.zip
+          if-no-files-found: error
+
+  # ── 仅 tag 发布；ci/** 分支只上传 Actions 产物，不创建 Release
   release:
     name: release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, android]
+    if: startsWith(github.ref, 'refs/tags/v') && inputs.macos_only != true
+    needs: [check, windows, android, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

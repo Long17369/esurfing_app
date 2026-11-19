@@ -13,17 +13,17 @@ import android.provider.Settings
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
-import java.lang.ref.WeakReference
 
 /**
  * 持有常驻 FlutterEngine，使 Dart 侧 SessionHost 独立于 Activity 生命周期。
  * 前台服务负责把进程留住，Activity 只是这个 engine 的一个视图。
  */
-class EsurfingApplication : android.app.Application() {
+open class EsurfingApplication : android.app.Application() {
     var flutterEngine: FlutterEngine? = null
         private set
 
-    private var activityRef: WeakReference<Activity>? = null
+    private val activityHost = ActivityHost()
+    private var notificationPermissionPending = false
 
     override fun onCreate() {
         super.onCreate()
@@ -80,11 +80,20 @@ class EsurfingApplication : android.app.Application() {
     }
 
     fun attachActivity(activity: Activity) {
-        activityRef = WeakReference(activity)
+        activityHost.attach(activity)
+    }
+
+    fun resumeActivity(activity: Activity) {
+        activityHost.resume(activity)
+        if (notificationPermissionPending) requestNotificationPermission()
+    }
+
+    fun pauseActivity(activity: Activity) {
+        activityHost.pause(activity)
     }
 
     fun detachActivity(activity: Activity) {
-        if (activityRef?.get() === activity) activityRef = null
+        activityHost.detach(activity)
     }
 
     /**
@@ -93,16 +102,26 @@ class EsurfingApplication : android.app.Application() {
      * Dart 侧 State 与列表位置都还在。
      */
     private fun destroyUi() {
-        val activity = activityRef?.get() ?: return
-        activityRef = null
-        activity.runOnUiThread { activity.finishAndRemoveTask() }
+        activityHost.destroyUi()
     }
 
     private fun requestNotificationPermission() {
-        val activity = activityRef?.get() ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionPending = false
+                return
+            }
+            val activity = activityHost.foregroundActivity()
+            if (activity == null) {
+                // The resident engine can request this before its first UI exists.
+                notificationPermissionPending = true
+                return
+            }
+            notificationPermissionPending = false
             activity.requestPermissions(
-                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
                 NOTIFICATION_REQUEST
             )
         }
@@ -114,7 +133,7 @@ class EsurfingApplication : android.app.Application() {
     }
 
     private fun requestIgnoreBatteryOptimizations() {
-        val activity = activityRef?.get() ?: return
+        val activity = activityHost.foregroundActivity() ?: return
         val intent = Intent(
             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
             Uri.parse("package:$packageName")
@@ -167,35 +186,33 @@ class EsurfingApplication : android.app.Application() {
     }
 
     private fun hasWifiPermission(): Boolean {
-        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(
-                Manifest.permission.NEARBY_WIFI_DEVICES,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-        return permissions.any {
-            checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
-        }
+        // SSID is location-sensitive; NEARBY_WIFI_DEVICES alone does not grant it.
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     private fun requestWifiPermission() {
-        val activity = activityRef?.get() ?: return
+        val activity = activityHost.foregroundActivity() ?: return
         if (hasWifiPermission()) return
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             arrayOf(
                 Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.ACCESS_FINE_LOCATION
             )
         } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            // Android 12+ ignores a fine-only runtime location request.
+            arrayOf(
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
         }
         activity.requestPermissions(permissions, WIFI_REQUEST)
     }
 
     /** Android 10+ 无法直接开关 Wi-Fi，只能唤起系统面板让用户操作。 */
     private fun openWifiPanel() {
+        val activity = activityHost.foregroundActivity() ?: return
         val manager = applicationContext
             .getSystemService(Context.WIFI_SERVICE) as? WifiManager
         // Android 9 及以下还能直接打开射频，顺手打开省一步。
@@ -214,10 +231,8 @@ class EsurfingApplication : android.app.Application() {
         } else {
             Intent(Settings.ACTION_WIFI_SETTINGS)
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val host = activityRef?.get() ?: this
         try {
-            host.startActivity(intent)
+            activity.startActivity(intent)
         } catch (_: Exception) {
             // 打不开就算了，UI 会提示手动连接。
         }

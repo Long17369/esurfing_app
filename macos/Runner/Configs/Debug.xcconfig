@@ -1,0 +1,7 @@
+#include "../../Flutter/Flutter-Debug.xcconfig"
+#include "Warnings.xcconfig"
+
+// Plugin integration tests run on the host architecture. Release packaging
+// remains universal and verifies both slices separately.
+ARCHS = x86_64
+ONLY_ACTIVE_ARCH = YES

@@ -34,12 +34,25 @@ class SettingsPage extends StatelessWidget {
               SwitchListTile(
                 title: const Text('开机自启动'),
                 subtitle: Text(
-                  DesktopShell.supported ? '写入当前用户启动项（UAC 外）' : '仅 Windows 支持',
+                  Platform.isMacOS
+                      ? '系统登录项；可能需要在系统设置中允许（需签名应用）'
+                      : DesktopShell.supported
+                      ? '写入当前用户启动项（UAC 外）'
+                      : '仅 Windows / macOS 支持',
                 ),
                 value: ui.autoStart,
                 onChanged: DesktopShell.supported
                     ? (value) async {
-                        await desktopShell.setAutoStart(value);
+                        try {
+                          await desktopShell.setAutoStart(value);
+                        } catch (error) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('开机启动设置失败：$error')),
+                            );
+                          }
+                          return;
+                        }
                         await controller.updateUi(
                           ui.copyWith(autoStart: value),
                         );
@@ -67,12 +80,12 @@ class SettingsPage extends StatelessWidget {
               SwitchListTile(
                 title: const Text('效率模式'),
                 subtitle: Text(
-                  DesktopShell.supported
+                  DesktopShell.supportsEfficiencyMode
                       ? '隐藏到托盘时让 Windows 把本进程当作后台任务，减少 CPU 占用'
                       : '仅 Windows 支持',
                 ),
                 value: ui.efficiencyMode,
-                onChanged: DesktopShell.supported
+                onChanged: DesktopShell.supportsEfficiencyMode
                     ? (value) async {
                         await controller.updateUi(
                           ui.copyWith(efficiencyMode: value),
@@ -115,7 +128,8 @@ class SettingsPage extends StatelessWidget {
                     title: const Text('后台多久后销毁界面'),
                     subtitle: const Text('到时间后界面被销毁，点通知可重新打开'),
                     trailing: DropdownButton<int>(
-                      value: _destroyChoices.contains(ui.backgroundDestroyMinutes)
+                      value:
+                          _destroyChoices.contains(ui.backgroundDestroyMinutes)
                           ? ui.backgroundDestroyMinutes
                           : 30,
                       items: [
@@ -179,7 +193,7 @@ class _WifiTile extends StatelessWidget {
     if (!WifiShell.supported) {
       return const ListTile(
         title: Text('Wi-Fi 自动登录'),
-        subtitle: Text('Windows 侧暂未实现；该功能目前只在 Android 生效'),
+        subtitle: Text('该功能目前只在 Android 生效'),
         trailing: Chip(label: Text('未实现')),
         enabled: false,
       );
@@ -194,9 +208,7 @@ class _WifiTile extends StatelessWidget {
         : '当前未连接 Wi-Fi';
     return ListTile(
       title: const Text('Wi-Fi 自动登录'),
-      subtitle: Text(
-        '$subtitle\n目标 Wi-Fi 在账号编辑页里设置，按账号生效',
-      ),
+      subtitle: Text('$subtitle\n目标 Wi-Fi 在账号编辑页里设置，按账号生效'),
       isThreeLine: true,
       trailing: status.permissionGranted
           ? IconButton(
@@ -289,8 +301,8 @@ class _AboutTile extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 4, 16, 24),
               child: Text(
-                '原生后端与 App 通过 C ABI 通信。Apple 平台（macOS/iOS）'
-                '将在单独分支实现，本期不构建、不测试。',
+                '原生后端与 App 通过 C ABI 通信。macOS 支持菜单栏常驻；'
+                '未签名、未公证构建的 Keychain 和登录项能力受系统限制。iOS 尚未支持。',
                 style: TextStyle(fontSize: 12),
               ),
             ),

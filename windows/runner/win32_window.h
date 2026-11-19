@@ -12,6 +12,8 @@
 // rendering and input handling
 class Win32Window {
  public:
+  static constexpr wchar_t kWindowClassName[] = L"EsurfingApp.MainWindow.v1";
+
   struct Point {
     unsigned int x;
     unsigned int y;

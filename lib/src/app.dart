@@ -66,18 +66,31 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   int _index = 0;
-  Timer? _backgroundTimer;
+  late final AndroidBackgroundUiLifecycle _backgroundUi;
 
   @override
   void initState() {
     super.initState();
+    _backgroundUi = AndroidBackgroundUiLifecycle(
+      delay: () {
+        final ui = widget.controller.config.ui;
+        if (!ui.hideInBackground || ui.backgroundDestroyMinutes <= 0) {
+          return null;
+        }
+        return Duration(minutes: ui.backgroundDestroyMinutes);
+      },
+      destroyUi: () {
+        widget.controller.logs.add('已达到后台隐藏时间，销毁界面（保活继续）');
+        unawaited(AndroidShell.destroyUi());
+      },
+    );
     WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _backgroundTimer?.cancel();
+    _backgroundUi.dispose();
     super.dispose();
   }
 
@@ -85,38 +98,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (!Platform.isAndroid) return;
-    switch (state) {
-      case AppLifecycleState.resumed:
-        _cancelBackgroundDestroy();
-      case AppLifecycleState.paused:
-      case AppLifecycleState.hidden:
-        _armBackgroundDestroy();
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.detached:
-        break;
-    }
-  }
-
-  void _cancelBackgroundDestroy() {
-    _backgroundTimer?.cancel();
-    _backgroundTimer = null;
-  }
-
-  /// 长时间留在后台就销毁界面（也从最近任务里移除），保活与前台服务不动。
-  void _armBackgroundDestroy() {
-    _cancelBackgroundDestroy();
-    final ui = widget.controller.config.ui;
-    final minutes = ui.backgroundDestroyMinutes;
-    if (!ui.hideInBackground || minutes <= 0) return;
-    _backgroundTimer = Timer(Duration(minutes: minutes), () {
-      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
-        return;
-      }
-      widget.controller.logs.add(
-        '已置于后台 $minutes 分钟，销毁界面（保活继续）',
-      );
-      AndroidShell.destroyUi();
-    });
+    _backgroundUi.didChangeAppLifecycleState(state);
   }
 
   static const _destinations = [

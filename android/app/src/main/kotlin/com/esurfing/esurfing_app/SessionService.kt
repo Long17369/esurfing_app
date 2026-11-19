@@ -1,5 +1,6 @@
 package com.esurfing.esurfing_app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 
@@ -85,6 +87,13 @@ class SessionService : Service() {
         }
 
         fun update(context: Context, text: String) {
+            // A foreground service may run without notification permission, but
+            // ordinary NotificationManager.notify calls still require it.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) return
+            }
             val manager =
                 context.getSystemService(NotificationManager::class.java)
             val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -115,7 +124,7 @@ class SessionService : Service() {
                 .setContentIntent(open)
                 .setOngoing(true)
                 .build()
-            if (channel != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && channel != null) {
                 manager.createNotificationChannel(channel)
             }
             manager.notify(NOTIFICATION_ID, notification)
