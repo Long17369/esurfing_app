@@ -43,7 +43,7 @@ jobs:
   # ── 静态检查与单测（纯 Dart，跑一份就够）
   check:
     name: analyze & test
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_only == true) }}
+    if: ${{ inputs.macos_only != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -64,7 +64,7 @@ jobs:
   # ── Windows x64：MinGW 编 esurfing.dll → flutter build windows → zip
   windows:
     name: windows x64
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_only == true) }}
+    if: ${{ inputs.macos_only != true }}
     needs: source
     runs-on: windows-latest
     env:
@@ -146,7 +146,7 @@ jobs:
   # ── Android：用同一个 C 库版本编三个 ABI 的 so，再打 APK
   android:
     name: android apk
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.macos_only == true) }}
+    if: ${{ inputs.macos_only != true }}
     needs: source
     runs-on: ubuntu-latest
     env:
@@ -289,7 +289,6 @@ jobs:
 
   macos:
     name: macOS universal
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.macos_only == true }}
     needs: source
     runs-on: macos-15
     timeout-minutes: 45
@@ -362,7 +361,7 @@ jobs:
   # ── 仅 tag 发布；ci/** 分支只上传 Actions 产物，不创建 Release
   release:
     name: release
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.macos_only != true)
+    if: startsWith(github.ref, 'refs/tags/v') && inputs.macos_only != true
     needs: [check, windows, android, macos]
     runs-on: ubuntu-latest
     permissions:
