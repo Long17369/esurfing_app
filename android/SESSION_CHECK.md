@@ -8,11 +8,14 @@ The library envelope contains parser fixture data, not executable server code.
 The native post-login connectivity check still performs its normal public,
 credential-free probes; this is not a test of a real campus account.
 
-Build the current backend separately (NDK 28.2, API 24, x86_64,
+Build the current backend separately (NDK 28.2, API 24, x86_64 for the
+emulator or arm64-v8a for an authorized ARM64 device,
 `-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384`) and copy its output to
 an isolated `jni/x86_64/libesurfing.so` directory. Do not reuse the checked-in
 JNI binaries as evidence for changed backend code. Verify every ELF LOAD
 alignment and the packaged library checksum.
+For ARM64 use `jni/arm64-v8a/libesurfing.so` and `-Ptarget-platform=android-arm64`.
+The automated device runner below is still restricted to the x86_64 emulator.
 
 From `android/`, with Java 21, Flutter and Android SDK configured:
 
@@ -70,13 +73,18 @@ adb -s emulator-5554 shell am broadcast \
 Receiver commands: `permission` requests notifications; `wifiPermission`
 requests location/nearby permission; `notification` sends the **actual active
 notification's PendingIntent**; `stop` disposes the real HostClient/native
-session, stops the service, and closes the loopback server. Reject and grant
+session, stops the service, and closes the loopback server. Android can block
+the receiver's background launch even if a real notification tap would work.
+Use the system notification shade for lifecycle acceptance. Reject and grant
 permissions using the system dialog or emulator package permission controls.
 
-Press Home and resume before six seconds: `destroyCalls` must remain unchanged.
-Press Home for more than six seconds: Activity destruction count must increase,
-but engine/PID/host identity must remain stable and `/.../keep.cgi` request count
-must continue increasing with `nativeKeepRunning=true`. Send `notification`:
+Press Home and resume before one minute, once from the launcher and once from
+the real notification: `destroyCalls` and `activitiesCreated` must remain unchanged,
+and `recentTaskIds` must contain the same single task.
+Press Home for more than one minute: Activity destruction count must increase,
+`recentTaskIds` must be empty, but engine/PID/host identity must remain stable
+and `/.../keep.cgi` request count must continue increasing with
+`nativeKeepRunning=true`. Tap the isolated session notification:
 a new Activity must attach to those same identities and the keep count must
 continue increasing. Check service/notification state and logcat for crashes.
 After `stop`, verify `phase=disposed`, no keep traffic, and no foreground service.

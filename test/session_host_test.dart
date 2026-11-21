@@ -10,11 +10,19 @@ import 'package:ffi/ffi.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class FakeBindings extends EsfBindings {
-  FakeBindings({this.owned = true, this.nativeVersion = '1.2.1'})
-    : super.fromLibrary(DynamicLibrary.process());
+  FakeBindings({
+    this.owned = true,
+    this.nativeVersion = '1.2.1',
+    bool supportsWifiRecovery = false,
+  }) : _wifiRecovery = supportsWifiRecovery,
+       super.fromLibrary(DynamicLibrary.process());
 
   final bool owned;
   final String nativeVersion;
+  final bool _wifiRecovery;
+  @override
+  bool get supportsWifiRecovery => _wifiRecovery;
+  final List<String> networkOperations = [];
   int created = 0;
   int destroyed = 0;
   int loggedIn = 0;
@@ -98,7 +106,44 @@ class FakeBindings extends EsfBindings {
   ) => EsfStatus.ok;
 
   @override
-  int keepStop(Pointer<EsfClient> client) => EsfStatus.ok;
+  int keepStop(Pointer<EsfClient> client) {
+    networkOperations.add('stop');
+    return EsfStatus.ok;
+  }
+
+  @override
+  int keepStart(Pointer<EsfClient> client, Pointer<EsfOptions> options) {
+    networkOperations.add('start');
+    return EsfStatus.ok;
+  }
+
+  @override
+  int keepResume(
+    Pointer<EsfClient> client,
+    Pointer<EsfOptions> options,
+    bool linkChanged,
+  ) {
+    networkOperations.add(linkChanged ? 'reauth' : 'verify');
+    return EsfStatus.ok;
+  }
+
+  @override
+  int setAndroidNetwork(
+    Pointer<EsfClient> client,
+    int handle,
+    String ipv4,
+    String gateway,
+  ) {
+    networkOperations.add('bind $handle');
+    return EsfStatus.ok;
+  }
+
+  @override
+  int getEndpoint(
+    Pointer<EsfClient> client,
+    Pointer<Pointer<Utf8>> ip,
+    Pointer<Pointer<Utf8>> mac,
+  ) => EsfStatus.ok;
 
   @override
   String errorText(String? code) => '认证失败';
@@ -153,6 +198,55 @@ const params = SessionParams(
 );
 
 void main() {
+  test('Wi-Fi 失联暂停并立即恢复保活，过期更新和手动退出后不复活', () async {
+    final bindings = FakeBindings(supportsWifiRecovery: true);
+    final host = HostHarness(bindings);
+    await host.start();
+    const original = SessionWifiRoute(1, '192.0.2.20', '192.0.2.1');
+    const restored = SessionWifiRoute(2, '192.0.2.20', '192.0.2.1');
+    const changed = SessionWifiRoute(3, '192.0.2.21', '192.0.2.1');
+    Future<Map> wifi(SessionWifiRoute? route, {int id = 7}) =>
+        host.command('updateWifi', {'sessionId': id, 'route': route?.toMap()});
+
+    expect(
+      (await host.command('connect', {
+        ...params.toMap(),
+        'wifiSessionId': 7,
+        'wifiRoute': original.toMap(),
+      }))['ok'],
+      isTrue,
+    );
+    await host.command('startKeep');
+    await wifi(null);
+    final waiting = host.received.lastWhere((m) => m['type'] == 'state');
+    expect((waiting['state'] as Map)['phase'], 'wifiWaiting');
+    await wifi(null);
+    await wifi(changed, id: 6);
+    await wifi(restored);
+    await wifi(restored);
+    await wifi(changed);
+    expect(bindings.networkOperations, [
+      'bind 1',
+      'start',
+      'stop',
+      'stop',
+      'bind 2',
+      'verify',
+      'stop',
+      'bind 3',
+      'reauth',
+    ]);
+    expect(bindings.loggedIn, 1);
+
+    await wifi(null);
+    await host.command('disconnect');
+    bindings.networkOperations.clear();
+    await wifi(restored);
+    expect(bindings.networkOperations, isEmpty);
+    expect(bindings.loggedIn, 1);
+    await host.close();
+  });
+
   test('旧库或不同 ABI 在创建客户端和认证前拒绝，并报告升级错误', () async {
     for (final bindings in [
       FakeBindings(owned: false),

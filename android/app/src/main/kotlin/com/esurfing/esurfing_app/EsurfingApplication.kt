@@ -10,9 +10,16 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import java.io.IOException
+import java.net.Proxy
+import java.net.URL
+import java.util.concurrent.Executors
+import javax.net.ssl.HttpsURLConnection
 
 /**
  * 持有常驻 FlutterEngine，使 Dart 侧 SessionHost 独立于 Activity 生命周期。
@@ -22,24 +29,54 @@ open class EsurfingApplication : android.app.Application() {
     var flutterEngine: FlutterEngine? = null
         private set
 
-    private val activityHost = ActivityHost()
+    private var androidChannel: MethodChannel? = null
+    private val activityHost = ActivityHost {
+        androidChannel?.invokeMethod("backgroundUiRemoved", null)
+    }
     private var notificationPermissionPending = false
+    private var pendingWifiLocation = false
+    private val wifiProbeExecutor by lazy { Executors.newSingleThreadExecutor() }
+    private val wifiNetworks by lazy(LazyThreadSafetyMode.NONE) {
+        WifiNetworkMonitor(this, ::hasWifiPermission)
+    }
 
     override fun onCreate() {
         super.onCreate()
         val engine = FlutterEngine(this)
-        engine.dartExecutor.executeDartEntrypoint(
-            DartExecutor.DartEntrypoint.createDefault()
-        )
+        val wifiMonitor = wifiNetworks
+        EventChannel(engine.dartExecutor.binaryMessenger, WIFI_NETWORK_EVENTS)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
+                    wifiMonitor.listen { events.success(it) }
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    wifiMonitor.listen(null)
+                }
+            })
         flutterEngine = engine
-        MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+        val channel = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+        androidChannel = channel
+        channel
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "startSessionService" -> {
-                        SessionService.start(this)
-                        result.success(null)
+                        val requested = call.argument<Boolean>("wifiLocation") == true
+                        val wifiLocation = requested && hasWifiPermission() &&
+                            (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                                activityHost.foregroundActivity() != null)
+                        try {
+                            SessionService.start(this, wifiLocation = wifiLocation)
+                            pendingWifiLocation = requested && !wifiLocation
+                            result.success(wifiLocation)
+                        } catch (error: IllegalStateException) {
+                            result.error("foreground_service", error.message, null)
+                        } catch (error: SecurityException) {
+                            result.error("foreground_service", error.message, null)
+                        }
                     }
                     "stopSessionService" -> {
+                        pendingWifiLocation = false
                         SessionService.stop(this)
                         result.success(null)
                     }
@@ -62,6 +99,44 @@ open class EsurfingApplication : android.app.Application() {
                         result.success(null)
                     }
                     "wifiStatus" -> result.success(wifiStatus())
+                    "wifiNetworkSnapshot" -> result.success(wifiNetworks.snapshot())
+                    "probeWifiInternet" -> {
+                        val handle = call.argument<Number>("handle")?.toLong()
+                        val network = handle?.let(wifiMonitor::unvalidatedInternetLink)
+                        if (network == null) {
+                            result.success(null)
+                        } else {
+                            wifiProbeExecutor.execute {
+                                try {
+                                    val connection = network.openConnection(
+                                        URL("https://connect.rom.miui.com/generate_204"), Proxy.NO_PROXY,
+                                    ) as HttpsURLConnection
+                                    try {
+                                        connection.connectTimeout = 4000
+                                        connection.readTimeout = 4000
+                                        connection.instanceFollowRedirects = false
+                                        connection.useCaches = false
+                                        result.success(connection.responseCode == 204)
+                                    } finally {
+                                        connection.disconnect()
+                                    }
+                                } catch (error: IOException) {
+                                    Log.i("EsurfingSession", "Scoped HTTPS probe failed: ${error.javaClass.simpleName}")
+                                    result.success(false)
+                                } catch (error: SecurityException) {
+                                    result.error("wifi_probe", error.message, null)
+                                }
+                            }
+                        }
+                    }
+                    "requestWifiRevalidation" -> {
+                        val handle = call.argument<Number>("handle")?.toLong()
+                        try {
+                            result.success(handle != null && wifiMonitor.requestRevalidation(handle))
+                        } catch (error: SecurityException) {
+                            result.error("wifi_revalidation", error.message, null)
+                        }
+                    }
                     "requestWifiPermission" -> {
                         requestWifiPermission()
                         result.success(hasWifiPermission())
@@ -70,21 +145,42 @@ open class EsurfingApplication : android.app.Application() {
                         openWifiPanel()
                         result.success(null)
                     }
-                    "destroyUi" -> {
-                        destroyUi()
+                    "setBackgroundDestroyMinutes" -> {
+                        activityHost.setBackgroundDestroyMinutes(
+                            call.argument<Number>("minutes")?.toLong() ?: 0L
+                        )
                         result.success(null)
                     }
                     else -> result.notImplemented()
                 }
             }
+        engine.dartExecutor.executeDartEntrypoint(
+            DartExecutor.DartEntrypoint.createDefault()
+        )
     }
 
     fun attachActivity(activity: Activity) {
         activityHost.attach(activity)
     }
 
+    fun startActivityHost(activity: Activity) {
+        activityHost.start(activity)
+    }
+
     fun resumeActivity(activity: Activity) {
         activityHost.resume(activity)
+        if (activityHost.foregroundActivity() !== activity) return
+        wifiNetworks.snapshot()
+        if (pendingWifiLocation && hasWifiPermission()) {
+            try {
+                SessionService.start(this, wifiLocation = true)
+                pendingWifiLocation = false
+            } catch (error: IllegalStateException) {
+                Log.w("EsurfingSession", "Unable to update foreground Wi-Fi scope", error)
+            } catch (error: SecurityException) {
+                Log.w("EsurfingSession", "Unable to update foreground Wi-Fi scope", error)
+            }
+        }
         if (notificationPermissionPending) requestNotificationPermission()
     }
 
@@ -92,17 +188,12 @@ open class EsurfingApplication : android.app.Application() {
         activityHost.pause(activity)
     }
 
-    fun detachActivity(activity: Activity) {
-        activityHost.detach(activity)
+    fun stopActivityHost(activity: Activity) {
+        activityHost.stop(activity)
     }
 
-    /**
-     * 销毁界面并把它从最近任务里移除，但 FlutterEngine 与前台服务都留着，
-     * 保活照常跑。点通知会重新建一个 Activity 挂到同一个 engine 上，
-     * Dart 侧 State 与列表位置都还在。
-     */
-    private fun destroyUi() {
-        activityHost.destroyUi()
+    fun detachActivity(activity: Activity) {
+        activityHost.detach(activity)
     }
 
     private fun requestNotificationPermission() {
@@ -152,6 +243,7 @@ open class EsurfingApplication : android.app.Application() {
      * 所以只提供「当前 SSID / 射频状态 / 权限状态」，连接一律交给系统。
      */
     private fun wifiStatus(): Map<String, Any?> {
+        wifiNetworks.snapshot()
         val manager = applicationContext
             .getSystemService(Context.WIFI_SERVICE) as? WifiManager
             ?: return mapOf("supported" to false)
@@ -189,6 +281,10 @@ open class EsurfingApplication : android.app.Application() {
         // SSID is location-sensitive; NEARBY_WIFI_DEVICES alone does not grant it.
         return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
+    }
+
+    internal fun onWifiPermissionResult(requestCode: Int) {
+        if (requestCode == WIFI_REQUEST) wifiNetworks.snapshot(forceEvent = true)
     }
 
     private fun requestWifiPermission() {
@@ -240,6 +336,7 @@ open class EsurfingApplication : android.app.Application() {
 
     companion object {
         private const val CHANNEL = "esurfing/android"
+        private const val WIFI_NETWORK_EVENTS = "esurfing/android/wifi_networks"
         private const val NOTIFICATION_REQUEST = 1001
         private const val WIFI_REQUEST = 1002
     }

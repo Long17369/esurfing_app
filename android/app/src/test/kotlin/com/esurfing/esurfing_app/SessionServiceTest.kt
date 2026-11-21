@@ -3,8 +3,12 @@ package com.esurfing.esurfing_app
 import android.Manifest
 import android.app.Application
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ActivityInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
@@ -33,8 +37,7 @@ class SessionServiceTest {
         SessionService.update(context, "offline test")
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val notification = manager.activeNotifications.single().notification
-        val open = shadowOf(notification.contentIntent).savedIntent
-        assertEquals(MainActivity::class.java.name, open.component?.className)
+        assertMainTaskIntent(context, notification.contentIntent)
     }
 
     @Test
@@ -43,7 +46,23 @@ class SessionServiceTest {
         assertEquals(Service.START_STICKY, service.onStartCommand(null, 0, 1))
         assertNotNull(shadowOf(service).lastForegroundNotification)
         val notification = shadowOf(service).lastForegroundNotification
-        val open = shadowOf(notification.contentIntent).savedIntent
-        assertEquals(MainActivity::class.java.name, open.component?.className)
+        assertMainTaskIntent(service, notification.contentIntent)
+    }
+
+    private fun assertMainTaskIntent(context: Context, pendingIntent: PendingIntent) {
+        val main = ComponentName(context, MainActivity::class.java)
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        val open = shadowOf(pendingIntent).savedIntent
+        assertEquals(main, launch?.component)
+        assertEquals(main, open.component)
+        assertEquals(Intent.ACTION_MAIN, open.action)
+        assertEquals(setOf(Intent.CATEGORY_LAUNCHER), open.categories)
+        assertEquals(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,
+            open.flags
+        )
+        val activity = context.packageManager.getActivityInfo(main, 0)
+        assertEquals(ActivityInfo.LAUNCH_SINGLE_TASK, activity.launchMode)
+        assertEquals(context.packageName, activity.taskAffinity)
     }
 }

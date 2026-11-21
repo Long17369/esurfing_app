@@ -224,15 +224,15 @@ class _Actions extends StatelessWidget {
             OutlinedButton.icon(
               onPressed: !online || snapshot.isBusy
                   ? null
-                  : snapshot.keepRunning
+                  : snapshot.keepRequested
                   ? controller.stopKeep
                   : controller.startKeep,
               icon: Icon(
-                snapshot.keepRunning
+                snapshot.keepRequested
                     ? Icons.pause_circle_outline
                     : Icons.autorenew,
               ),
-              label: Text(snapshot.keepRunning ? '停止保活' : '开始保活'),
+              label: Text(snapshot.keepRequested ? '停止保活' : '开始保活'),
             ),
             OutlinedButton.icon(
               onPressed: snapshot.isBusy
@@ -275,10 +275,7 @@ class _WifiCard extends StatelessWidget {
       child: Column(
         children: [
           ListTile(
-            leading: Icon(
-              matched ? Icons.wifi : Icons.wifi_off,
-              color: color,
-            ),
+            leading: Icon(matched ? Icons.wifi : Icons.wifi_off, color: color),
             title: Text('Wi-Fi：$target'),
             subtitle: Text(subtitle),
             trailing: TextButton(

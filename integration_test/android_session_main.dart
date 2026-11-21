@@ -34,7 +34,7 @@ class _SessionCheckState extends State<_SessionCheck>
   final _identity = DateTime.now().microsecondsSinceEpoch.toString();
   final _counts = <String, int>{};
   final _history = <String>[];
-  late final AndroidBackgroundUiLifecycle _lifecycle;
+  late final StreamSubscription<void> _removalEvents;
   HttpServer? _server;
   Timer? _reporter;
   String _phase = 'starting';
@@ -47,12 +47,8 @@ class _SessionCheckState extends State<_SessionCheck>
   @override
   void initState() {
     super.initState();
-    _lifecycle = AndroidBackgroundUiLifecycle(
-      delay: () => const Duration(seconds: 6),
-      destroyUi: () {
-        _destroyCalls++;
-        unawaited(AndroidShell.destroyUi());
-      },
+    _removalEvents = AndroidShell.backgroundUiRemoved.listen(
+      (_) => _destroyCalls++,
     );
     WidgetsBinding.instance.addObserver(this);
     _check.setMethodCallHandler((call) async {
@@ -81,6 +77,7 @@ class _SessionCheckState extends State<_SessionCheck>
 
   Future<void> _start() async {
     try {
+      await AndroidShell.setBackgroundDestroyMinutes(1);
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       _server = server;
       server.listen((request) async {
@@ -158,13 +155,12 @@ class _SessionCheckState extends State<_SessionCheck>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _history.add(state.name);
-    _lifecycle.didChangeAppLifecycleState(state);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _lifecycle.dispose();
+    unawaited(_removalEvents.cancel());
     _reporter?.cancel();
     super.dispose();
   }

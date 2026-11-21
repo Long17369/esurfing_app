@@ -1,4 +1,5 @@
 import 'package:esurfing_app/src/data/config_repository.dart';
+import 'package:esurfing_app/src/platform/wifi_shell.dart';
 import 'package:esurfing_app/src/state/wifi_rules.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -7,7 +8,6 @@ void main() {
     WifiAutoLoginDecision decide({
       String target = 'Campus',
       String current = 'Campus',
-      String previous = '',
       String handled = '',
       bool enabled = true,
       bool session = false,
@@ -15,7 +15,6 @@ void main() {
     }) => decideWifiAutoLogin(
       target: target,
       current: current,
-      previous: previous,
       alreadyHandled: handled,
       autoLoginEnabled: enabled,
       hasSession: session,
@@ -33,35 +32,71 @@ void main() {
     });
 
     test('同一次连接只触发一次', () {
-      expect(
-        decide(previous: 'Campus'),
-        WifiAutoLoginDecision.alreadyHandled,
-      );
-      expect(
-        decide(handled: 'Campus'),
-        WifiAutoLoginDecision.alreadyHandled,
-      );
+      expect(decide(handled: 'Campus'), WifiAutoLoginDecision.alreadyHandled);
     });
 
     test('已有会话时不动，保留票据', () {
-      expect(
-        decide(session: true),
-        WifiAutoLoginDecision.keepSession,
-      );
+      expect(decide(session: true), WifiAutoLoginDecision.keepSession);
       expect(decide(busy: true), WifiAutoLoginDecision.keepSession);
     });
 
     test('账号没开自动登录就只记录', () {
-      expect(
-        decide(enabled: false),
-        WifiAutoLoginDecision.disabled,
-      );
+      expect(decide(enabled: false), WifiAutoLoginDecision.disabled);
     });
 
     test('目标带空格时按去空格比较', () {
       expect(
         decide(target: ' Campus ', current: 'Campus'),
         WifiAutoLoginDecision.login,
+      );
+    });
+  });
+
+  group('Wi-Fi 会话出口', () {
+    WifiNetwork network(
+      int handle, {
+      String ssid = 'Campus',
+      bool ready = true,
+    }) => WifiNetwork(
+      handle: handle,
+      ssid: ssid,
+      interfaceName: 'wlan0',
+      ipv4Addresses: const [
+        WifiLinkAddress(address: '192.0.2.5', prefixLength: 24),
+      ],
+      gateway: '192.0.2.1',
+      ready: ready,
+    );
+
+    WifiNetworkSnapshot snapshot(List<WifiNetwork> networks) =>
+        WifiNetworkSnapshot(permissionGranted: true, networks: networks);
+
+    test('同 SSID 重连使用新句柄并允许复用票据', () {
+      final initial = selectWifiRoute(snapshot([network(1)]), 'Campus')!;
+      expect(
+        selectWifiRoute(snapshot([]), 'Campus', previous: initial),
+        isNull,
+      );
+      final resumed = selectWifiRoute(snapshot([network(2)]), 'Campus')!;
+      expect(initial.sameRoute(resumed), isFalse);
+      expect(initial.sameLink(resumed), isTrue);
+    });
+
+    test('未知 SSID、链路未就绪或身份不明确时不选择错误出口', () {
+      final initial = selectWifiRoute(snapshot([network(1)]), 'Campus')!;
+      expect(
+        selectWifiRoute(snapshot([network(1, ssid: '')]), 'Campus'),
+        isNull,
+      );
+      expect(
+        selectWifiRoute(snapshot([network(1, ready: false)]), 'Campus'),
+        isNull,
+      );
+      final ambiguous = snapshot([network(2), network(1)]);
+      expect(selectWifiRoute(ambiguous, 'Campus'), isNull);
+      expect(
+        selectWifiRoute(ambiguous, 'Campus', previous: initial)?.handle,
+        1,
       );
     });
   });

@@ -32,6 +32,91 @@ class WifiStatus {
       'WifiStatus(supported: $supported, enabled: $enabled, ssid: $ssid, perm: $permissionGranted)';
 }
 
+/// IPv4 address and subnet prefix for the Wi-Fi interface (not the default route).
+class WifiLinkAddress {
+  const WifiLinkAddress({required this.address, required this.prefixLength});
+
+  final String address;
+  final int prefixLength;
+}
+
+class WifiNetwork {
+  const WifiNetwork({
+    required this.handle,
+    required this.ssid,
+    required this.interfaceName,
+    required this.ipv4Addresses,
+    required this.ready,
+    this.gateway,
+  });
+
+  /// Android's opaque `Network.getNetworkHandle()` value, valid for this link
+  /// lifetime. Never persist it or assume the same SSID keeps the same handle.
+  final int handle;
+
+  /// Exact SSID when Android exposes it; otherwise empty (not proof of loss).
+  final String ssid;
+  final String interfaceName;
+  final List<WifiLinkAddress> ipv4Addresses;
+
+  /// Numeric IPv4 gateway from this link's default route, if available.
+  /// Its absence does not affect [ready].
+  final String? gateway;
+
+  /// App-unblocked interface with a usable IPv4 address. Neither internet
+  /// validation nor a default route is required. SSID may still be unknown.
+  final bool ready;
+}
+
+/// Full set of app-visible Android Wi-Fi links at one point in time.
+class WifiNetworkSnapshot {
+  const WifiNetworkSnapshot({
+    this.supported = false,
+    this.permissionGranted = false,
+    this.networks = const [],
+  });
+
+  final bool supported;
+
+  /// Fine location is granted; Android can still redact SSID (e.g. when
+  /// device location is disabled).
+  final bool permissionGranted;
+
+  /// Candidates, not ranked by default status or readiness.
+  final List<WifiNetwork> networks;
+
+  static const unsupported = WifiNetworkSnapshot();
+
+  factory WifiNetworkSnapshot.fromPlatform(Map<Object?, Object?> raw) {
+    final networks = raw['networks'] as List<Object?>? ?? const [];
+    return WifiNetworkSnapshot(
+      supported: raw['supported'] == true,
+      permissionGranted: raw['permissionGranted'] == true,
+      networks: List.unmodifiable(
+        networks.cast<Map<Object?, Object?>>().map((network) {
+          return WifiNetwork(
+            handle: network['handle'] as int,
+            ssid: network['ssid'] as String,
+            interfaceName: network['interfaceName'] as String,
+            ipv4Addresses: List.unmodifiable(
+              (network['ipv4Addresses'] as List<Object?>)
+                  .cast<Map<Object?, Object?>>()
+                  .map(
+                    (link) => WifiLinkAddress(
+                      address: link['address'] as String,
+                      prefixLength: link['prefixLength'] as int,
+                    ),
+                  ),
+            ),
+            ready: network['ready'] == true,
+            gateway: network['gateway'] as String?,
+          );
+        }),
+      ),
+    );
+  }
+}
+
 /// Wi-Fi 联动的最小平台能力。
 ///
 /// 平台事实（决定了这里的接口长什么样）：
@@ -43,16 +128,46 @@ class WifiStatus {
 ///   功能先作为实验性只做 Android，Windows 侧一律返回不支持。
 class WifiShell {
   static const MethodChannel _channel = MethodChannel('esurfing/android');
+  static const EventChannel _networkChannel = EventChannel(
+    'esurfing/android/wifi_networks',
+  );
+  static final Stream<WifiNetworkSnapshot> _networkEvents = _networkChannel
+      .receiveBroadcastStream()
+      .map(
+        (raw) => WifiNetworkSnapshot.fromPlatform(raw as Map<Object?, Object?>),
+      );
 
   /// Windows 本期不实现 Wi-Fi 联动。
   static bool get supported => Platform.isAndroid;
 
+  /// Returns the most recent callback state; discovery is asynchronous.
+  static Future<WifiNetworkSnapshot> networkSnapshot() async {
+    if (!supported) return WifiNetworkSnapshot.unsupported;
+    try {
+      final raw = await _channel.invokeMapMethod<Object?, Object?>(
+        'wifiNetworkSnapshot',
+      );
+      return raw == null
+          ? WifiNetworkSnapshot.unsupported
+          : WifiNetworkSnapshot.fromPlatform(raw);
+    } on MissingPluginException {
+      return WifiNetworkSnapshot.unsupported;
+    } on PlatformException {
+      return WifiNetworkSnapshot.unsupported;
+    }
+  }
+
+  /// Broadcast stream of full snapshots. Android sends current state when
+  /// observation starts, when it changes (including removals), and when the
+  /// SSID permission dialog completes. Subscribers joining an active stream
+  /// can fetch [networkSnapshot] for its current state.
+  static Stream<WifiNetworkSnapshot> get networkEvents =>
+      supported ? _networkEvents : const Stream.empty();
+
   static Future<WifiStatus> status() async {
     if (!supported) return WifiStatus.unsupported;
     try {
-      final raw = await _channel.invokeMapMethod<String, Object?>(
-        'wifiStatus',
-      );
+      final raw = await _channel.invokeMapMethod<String, Object?>('wifiStatus');
       if (raw == null) return WifiStatus.unsupported;
       return WifiStatus(
         supported: raw['supported'] as bool? ?? true,
@@ -67,7 +182,8 @@ class WifiShell {
     }
   }
 
-  /// 申请读取 SSID 所需的权限（Android 13+ 为「附近的设备」，以下为「位置信息」）。
+  /// 申请读取 SSID 所需的精确位置权限；仅「附近的设备」权限不足以读取 SSID。
+  /// 返回当前授权状态，不等待对话框；处理结果后 Android 会刷新 [networkEvents]。
   static Future<bool> requestPermission() async {
     if (!supported) return false;
     try {

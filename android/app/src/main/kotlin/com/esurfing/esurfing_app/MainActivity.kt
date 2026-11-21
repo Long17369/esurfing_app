@@ -16,14 +16,33 @@ class MainActivity : FlutterActivity() {
         (application as EsurfingApplication).attachActivity(this)
     }
 
+    override fun onStart() {
+        (application as EsurfingApplication).startActivityHost(this)
+        super.onStart()
+    }
+
     override fun onResume() {
         super.onResume()
         (application as EsurfingApplication).resumeActivity(this)
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        (application as EsurfingApplication).onWifiPermissionResult(requestCode)
+    }
+
     override fun onPause() {
         (application as EsurfingApplication).pauseActivity(this)
         super.onPause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        (application as EsurfingApplication).stopActivityHost(this)
     }
 
     override fun onDestroy() {

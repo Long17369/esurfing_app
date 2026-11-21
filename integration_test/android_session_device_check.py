@@ -30,6 +30,11 @@ def command(name):
     return adb("shell", "am", "broadcast", "-n", RECEIVER, "--es", "command", name)
 
 
+def launch():
+    adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN",
+        "-c", "android.intent.category.LAUNCHER", "-f", "0x10200000", "-n", ACTIVITY)
+
+
 def evidence(label):
     value = json.loads(adb("shell", "run-as", PACKAGE, "cat", "files/session-check.json"))
     results[label] = value
@@ -45,6 +50,14 @@ def controls():
 def tap(node):
     x1, y1, x2, y2 = map(int, re.findall(r"\d+", node.get("bounds")))
     adb("shell", "input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2))
+
+
+def tap_notification():
+    adb("shell", "cmd", "statusbar", "expand-notifications")
+    notification = next((n for n in controls() if
+                         n.get("text") == "Isolated native keep check"), None)
+    assert notification is not None, "No visible session notification"
+    tap(notification)
 
 
 def permission(name, allow, dialogs):
@@ -83,7 +96,7 @@ try:
     assert adb("shell", "getconf", "PAGE_SIZE").strip() == "16384"
     results["device"] = {"serial": SERIAL, "abi": "x86_64", "pageSize": 16384}
     assert PACKAGE in adb("shell", "pm", "list", "packages", PACKAGE).splitlines()[0]
-    adb("shell", "am", "start", "-W", "-n", ACTIVITY)
+    launch()
     for _ in range(60):
         try:
             started = evidence("started")
@@ -107,32 +120,41 @@ try:
     before = evidence("before-early-resume")
     adb("shell", "input", "keyevent", "KEYCODE_HOME")
     time.sleep(2)
-    adb("shell", "am", "start", "-W", "-n", ACTIVITY)
+    launch()
     time.sleep(5)
     resumed = evidence("early-resumed")
     same_session(before, resumed)
     assert resumed["destroyCalls"] == resumed["activitiesDestroyed"] == 0
     assert resumed["activitiesCreated"] == 1
+    assert len(before["recentTaskIds"]) == 1
+    assert resumed["recentTaskIds"] == before["recentTaskIds"]
 
     adb("shell", "input", "keyevent", "KEYCODE_HOME")
-    time.sleep(8)
+    tap_notification()
+    time.sleep(3)
+    notification_resumed = evidence("notification-resumed")
+    same_session(resumed, notification_resumed)
+    assert notification_resumed["destroyCalls"] == notification_resumed["activitiesDestroyed"] == 0
+    assert notification_resumed["activitiesCreated"] == 1
+    assert notification_resumed["recentTaskIds"] == before["recentTaskIds"]
+
+    adb("shell", "input", "keyevent", "KEYCODE_HOME")
+    time.sleep(65)
     removed = evidence("activity-destroyed")
     time.sleep(3)
     background = evidence("keeping-without-activity")
     same_session(removed, background)
     assert background["destroyCalls"] == background["activitiesDestroyed"] == 1
     assert background["activitiesCreated"] == 1
+    assert background["recentTaskIds"] == []
     assert "isForeground=true" in adb("shell", "dumpsys", "activity", "services", PACKAGE)
 
-    adb("shell", "cmd", "statusbar", "expand-notifications")
-    notification = next((n for n in controls() if
-                         n.get("text") == "Isolated native keep check"), None)
-    assert notification is not None, "No visible session notification"
-    tap(notification)
+    tap_notification()
     time.sleep(3)
     reopened = evidence("notification-reopened")
     same_session(background, reopened)
     assert reopened["activitiesCreated"] == 2 and reopened["activitiesDestroyed"] == 1
+    assert len(reopened["recentTaskIds"]) == 1
     assert reopened["lifecycle"][-1] == "resumed"
 
     command("stop")

@@ -204,6 +204,8 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - uses: gradle/actions/setup-gradle@v5
+
       # NDK 交给现成 action（r28c = 28.2.13676358，与 tool/build_native.sh 默认值一致）；
       # platform / build-tools 缺了由 Gradle 自动下载。
       - name: 安装 NDK
@@ -258,20 +260,50 @@ jobs:
         run: |
           df -h / | tail -1
           flutter pub get
-          flutter build apk --release
+          bash tool/package_android.sh
           version="$(sed -n 's/^version: *//p' pubspec.yaml)"
-          mkdir -p dist
-          cp build/app/outputs/flutter-apk/app-release.apk "dist/esurfing-app-android-$version.apk"
           printf 'app_sha=%s\nbackend_sha=%s\narchitecture=arm64-v8a,armeabi-v7a,x86_64\nmode=release\n' "$GITHUB_SHA" "$ESURFING_C_REF" > dist/android-build-source.txt
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
-          "$apksigner" verify --print-certs "dist/esurfing-app-android-$version.apk" > dist/android-signing.txt
+          for abi in all arm64-v8a armeabi-v7a x86_64; do
+            apk="dist/esurfing-app-android-$version.apk"
+            expected=$'arm64-v8a\narmeabi-v7a\nx86_64'
+            if [[ "$abi" != all ]]; then
+              apk="dist/esurfing-app-android-$abi-$version.apk"
+              expected="$abi"
+            fi
+            actual="$(unzip -Z1 "$apk" | awk -F/ '$1 == "lib" && $3 ~ /\.so$/ {print $2}' | LC_ALL=C sort -u)"
+            [[ "$actual" == "$expected" ]] || { echo "::error::$apk contains unexpected ABIs: $actual"; exit 1; }
+            signature="$("$apksigner" verify --print-certs "$apk")"
+            badging="$("${apksigner%/*}/aapt" dump badging "$apk")"
+            [[ "$badging" == *"versionCode='${version##*+}'"* ]] || { echo "::error::$apk has the wrong version code"; exit 1; }
+            if [[ "$abi" == all ]]; then
+              printf '%s\n' "$signature" > dist/android-signing.txt
+            else
+              printf '%s\n' "$signature" | diff -u dist/android-signing.txt -
+            fi
+          done
           head -4 dist/android-signing.txt
           ls -l dist/
           df -h / | tail -1
 
       - name: Android lint and behavior tests
         working-directory: android
-        run: ./gradlew :app:lintRelease :app:testDebugUnitTest --console=plain --max-workers=2
+        shell: bash
+        run: |
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          for delay in 20 60 0; do
+            if ./gradlew :app:lintRelease :app:testDebugUnitTest --console=plain --max-workers=2 2>&1 | tee "$log"; then
+              exit 0
+            else
+              status=$?
+            fi
+            if [[ "$delay" == 0 ]] || ! grep -Eq 'https://repo\.maven\.apache\.org/.*status code 429' "$log"; then
+              exit "$status"
+            fi
+            echo "::warning::Maven Central rate limited Gradle; retrying in ${delay}s"
+            sleep "$delay"
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -285,9 +317,32 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: android-apk
+          name: android-apk-all
+          path: dist/esurfing-app-android-[0-9]*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-arm64-v8a
+          path: dist/esurfing-app-android-arm64-v8a-*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-armeabi-v7a
+          path: dist/esurfing-app-android-armeabi-v7a-*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-x86_64
+          path: dist/esurfing-app-android-x86_64-*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-build-metadata
           path: |
-            dist/*.apk
             dist/android-build-source.txt
             dist/android-signing.txt
           if-no-files-found: error
@@ -367,25 +422,70 @@ jobs:
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v') && inputs.macos_only != true
-    needs: [check, windows, android, macos]
+    needs: [source, check, windows, android, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # release job 没有 checkout（只下载产物），gh 找不到本地 git 仓库会直接
-      # 报 fatal: not a git repository，所以每条命令都显式给 --repo。
+      # gh release create --notes-from-tag 需要本地附注 tag，且不能与 --repo 同用。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: '@(android-apk-*|android-build-metadata|windows-x64|macos-universal)'
           merge-multiple: true
+      - name: Validate release assets
+        id: assets
+        env:
+          TAG: ${{ github.ref_name }}
+          ESURFING_C_REF: ${{ needs.source.outputs.ref }}
+        shell: bash
+        run: |
+          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag &&
+             "$(git rev-parse "refs/tags/$TAG^{commit}")" == "$GITHUB_SHA" &&
+             "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] ||
+            { echo "::error::Expected annotated tag $TAG at the workflow commit"; exit 1; }
+          version="$(sed -n 's/^version: *//p' pubspec.yaml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\+[0-9]+$ && "v${version%+*}" == "$TAG" ]] ||
+            { echo "::error::pubspec version does not match release tag $TAG"; exit 1; }
+          assets=(
+            "dist/esurfing-app-android-$version.apk"
+            "dist/esurfing-app-android-arm64-v8a-$version.apk"
+            "dist/esurfing-app-android-armeabi-v7a-$version.apk"
+            "dist/esurfing-app-android-x86_64-$version.apk"
+            "dist/esurfing-app-windows-x64-$version.zip"
+            "dist/esurfing-app-macos-universal-$version.zip"
+            dist/android-build-source.txt
+            dist/android-signing.txt
+          )
+          for asset in "${assets[@]}"; do
+            [[ -f "$asset" && -s "$asset" ]] ||
+              { echo "::error::Missing or empty release asset: $asset"; exit 1; }
+          done
+          grep -Fxq "app_sha=$GITHUB_SHA" dist/android-build-source.txt &&
+            grep -Fxq "backend_sha=$ESURFING_C_REF" dist/android-build-source.txt ||
+            { echo "::error::Android build sources do not match the release"; exit 1; }
+          {
+            echo 'files<<EOF'
+            printf '%s\n' "${assets[@]}"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
       - name: 发布
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          RELEASE_ASSETS: ${{ steps.assets.outputs.files }}
+        shell: bash
         run: |
-          assets=(dist/*.apk dist/*.zip dist/*.txt)
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          mapfile -t assets <<< "$RELEASE_ASSETS"
+          if response="$(gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"; then
             gh release upload "$TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          elif [[ "${response%%$'\n'*}" =~ ^HTTP/[^[:space:]]+[[:space:]]+404([[:space:]]|$) ]]; then
+            gh release create "$TAG" "${assets[@]}" --verify-tag --title "$TAG" --notes-from-tag
           else
-            gh release create "$TAG" "${assets[@]}" --title "$TAG" --generate-notes --repo "$GITHUB_REPOSITORY"
+            echo "::error::Could not determine whether release $TAG exists"
+            exit 1
           fi

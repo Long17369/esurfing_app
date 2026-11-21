@@ -2,6 +2,7 @@ package com.esurfing.esurfing_app
 
 import android.app.NotificationManager
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -11,6 +12,7 @@ import android.os.Process
 import android.util.Log
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Compiled only into the explicitly requested isolated debug APK. */
@@ -34,11 +36,14 @@ class SessionCheckApplication : EsurfingApplication() {
         checkChannel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "evidence" -> {
+                    val tasks = getSystemService(ActivityManager::class.java).appTasks
+                        .map { it.taskInfo.persistentId }
                     val text = JSONObject(call.arguments.toString())
                         .put("engine", System.identityHashCode(flutterEngine))
                         .put("pid", Process.myPid())
                         .put("activitiesCreated", created)
                         .put("activitiesDestroyed", destroyed)
+                        .put("recentTaskIds", JSONArray(tasks))
                         .toString()
                     File(filesDir, "session-check.json").writeText(text)
                     Log.i("SessionCheck", "engine=${System.identityHashCode(flutterEngine)} $text")

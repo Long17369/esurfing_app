@@ -4,6 +4,7 @@ enum SessionPhase {
   authenticating,
   online,
   keeping,
+  wifiWaiting,
   disconnecting,
   error;
 
@@ -18,6 +19,7 @@ enum SessionPhase {
     SessionPhase.authenticating => '认证中',
     SessionPhase.online => '已连接',
     SessionPhase.keeping => '保活中',
+    SessionPhase.wifiWaiting => '等待 Wi-Fi 恢复',
     SessionPhase.disconnecting => '正在断开',
     SessionPhase.error => '出错',
   };
@@ -50,7 +52,11 @@ class SessionSnapshot {
       phase == SessionPhase.disconnecting;
 
   bool get isOnline =>
-      phase == SessionPhase.online || phase == SessionPhase.keeping;
+      phase == SessionPhase.online ||
+      phase == SessionPhase.keeping ||
+      phase == SessionPhase.wifiWaiting;
+
+  bool get keepRequested => keepRunning || phase == SessionPhase.wifiWaiting;
 
   SessionSnapshot copyWith({
     SessionPhase? phase,
@@ -95,6 +101,35 @@ class SessionSnapshot {
   );
 }
 
+class SessionWifiRoute {
+  const SessionWifiRoute(this.handle, this.ipv4, this.gateway);
+
+  final int handle;
+  final String ipv4;
+  final String gateway;
+
+  bool sameLink(SessionWifiRoute other) =>
+      ipv4 == other.ipv4 && gateway == other.gateway;
+
+  bool sameRoute(SessionWifiRoute other) =>
+      handle == other.handle && sameLink(other);
+
+  Map<String, Object?> toMap() => {
+    'handle': handle,
+    'ipv4': ipv4,
+    'gateway': gateway,
+  };
+
+  static SessionWifiRoute? fromMap(Object? value) {
+    if (value is! Map) return null;
+    return SessionWifiRoute(
+      value['handle'] as int,
+      value['ipv4'] as String,
+      value['gateway'] as String,
+    );
+  }
+}
+
 class SessionParams {
   const SessionParams({
     required this.account,
@@ -107,6 +142,8 @@ class SessionParams {
     this.mac = '',
     this.keepInterval = 0,
     this.preTerm = true,
+    this.wifiRoute,
+    this.wifiSessionId = 0,
   });
 
   final String account;
@@ -119,6 +156,8 @@ class SessionParams {
   final String mac;
   final double keepInterval;
   final bool preTerm;
+  final SessionWifiRoute? wifiRoute;
+  final int wifiSessionId;
 
   Map<String, Object?> toMap() => {
     'account': account,
@@ -131,6 +170,8 @@ class SessionParams {
     'mac': mac,
     'keepInterval': keepInterval,
     'preTerm': preTerm,
+    if (wifiRoute != null) 'wifiRoute': wifiRoute!.toMap(),
+    if (wifiRoute != null) 'wifiSessionId': wifiSessionId,
   };
 
   factory SessionParams.fromMap(Map<Object?, Object?> map) => SessionParams(
@@ -144,5 +185,7 @@ class SessionParams {
     mac: map['mac'] as String? ?? '',
     keepInterval: (map['keepInterval'] as num?)?.toDouble() ?? 0,
     preTerm: map['preTerm'] as bool? ?? true,
+    wifiRoute: SessionWifiRoute.fromMap(map['wifiRoute']),
+    wifiSessionId: map['wifiSessionId'] as int? ?? 0,
   );
 }

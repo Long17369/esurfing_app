@@ -157,6 +157,20 @@ class EsfBindings {
       );
   late final EsfQueryDart _esfQuery = _lib
       .lookupFunction<EsfQueryNative, EsfQueryDart>('esf_query');
+  late final EsfQueryDart _esfGetEndpoint = _lib
+      .lookupFunction<EsfQueryNative, EsfQueryDart>('esf_get_endpoint');
+  late final EsfSetAndroidNetworkDart _esfSetAndroidNetwork = _lib
+      .lookupFunction<EsfSetAndroidNetworkNative, EsfSetAndroidNetworkDart>(
+        'esf_set_android_network',
+      );
+  late final EsfKeepResumeDart _esfKeepResume = _lib
+      .lookupFunction<EsfKeepResumeNative, EsfKeepResumeDart>(
+        'esf_keep_resume',
+      );
+  late final bool supportsWifiRecovery =
+      _lib.providesSymbol('esf_set_android_network') &&
+      _lib.providesSymbol('esf_get_endpoint') &&
+      _lib.providesSymbol('esf_keep_resume');
   late final EsfOptionsInitDart _esfOptionsInit = _lib
       .lookupFunction<EsfOptionsInitNative, EsfOptionsInitDart>(
         'esf_options_init',
@@ -246,6 +260,34 @@ class EsfBindings {
 
   void setAllowDiscovery(Pointer<EsfClient> client, bool allow) =>
       _esfSetAllowDiscovery(client, allow ? 1 : 0);
+
+  int setAndroidNetwork(
+    Pointer<EsfClient> client,
+    int handle,
+    String ipv4,
+    String gateway,
+  ) {
+    final address = ipv4.toNativeUtf8();
+    final router = gateway.toNativeUtf8();
+    try {
+      return _esfSetAndroidNetwork(client, handle, address, router);
+    } finally {
+      malloc.free(address);
+      malloc.free(router);
+    }
+  }
+
+  int getEndpoint(
+    Pointer<EsfClient> client,
+    Pointer<Pointer<Utf8>> ip,
+    Pointer<Pointer<Utf8>> mac,
+  ) => _esfGetEndpoint(client, ip, mac);
+
+  int keepResume(
+    Pointer<EsfClient> client,
+    Pointer<EsfOptions> options,
+    bool linkChanged,
+  ) => _esfKeepResume(client, options, linkChanged ? 1 : 0);
 
   void optionsInit(Pointer<EsfOptions> options) => _esfOptionsInit(options);
 

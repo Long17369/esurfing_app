@@ -215,6 +215,19 @@ typedef EsfSetAllowDiscoveryDart = void Function(
   int allow,
 );
 
+typedef EsfSetAndroidNetworkNative = Int32 Function(
+  Pointer<EsfClient>,
+  Uint64,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef EsfSetAndroidNetworkDart = int Function(
+  Pointer<EsfClient>,
+  int,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+
 typedef EsfQueryNative = Int32 Function(
   Pointer<EsfClient> client,
   Pointer<Pointer<Utf8>> outIpv4,
@@ -252,6 +265,16 @@ typedef EsfKeepStartDart = int Function(
 );
 
 typedef EsfKeepStopNative = Int32 Function(Pointer<EsfClient> client);
+typedef EsfKeepResumeNative = Int32 Function(
+  Pointer<EsfClient>,
+  Pointer<EsfOptions>,
+  Int32,
+);
+typedef EsfKeepResumeDart = int Function(
+  Pointer<EsfClient>,
+  Pointer<EsfOptions>,
+  int,
+);
 typedef EsfKeepStopDart = int Function(Pointer<EsfClient> client);
 
 typedef EsfKeepRunningNative = Int32 Function(Pointer<EsfClient> client);

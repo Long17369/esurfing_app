@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -64,41 +63,50 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+class _AppShellState extends State<AppShell> {
   int _index = 0;
-  late final AndroidBackgroundUiLifecycle _backgroundUi;
+  int? _backgroundDestroyMinutes;
+  StreamSubscription<void>? _backgroundUiRemoved;
 
   @override
   void initState() {
     super.initState();
-    _backgroundUi = AndroidBackgroundUiLifecycle(
-      delay: () {
-        final ui = widget.controller.config.ui;
-        if (!ui.hideInBackground || ui.backgroundDestroyMinutes <= 0) {
-          return null;
-        }
-        return Duration(minutes: ui.backgroundDestroyMinutes);
-      },
-      destroyUi: () {
-        widget.controller.logs.add('已达到后台隐藏时间，销毁界面（保活继续）');
-        unawaited(AndroidShell.destroyUi());
-      },
-    );
-    WidgetsBinding.instance.addObserver(this);
+    if (!AndroidShell.supported) return;
+    _backgroundUiRemoved = AndroidShell.backgroundUiRemoved.listen((_) {
+      widget.controller.logs.add('已达到后台隐藏时间，销毁界面（保活继续）');
+    });
+    widget.controller.addListener(_syncBackgroundUiSettings);
+    _syncBackgroundUiSettings();
+  }
+
+  @override
+  void didUpdateWidget(AppShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!AndroidShell.supported || oldWidget.controller == widget.controller) {
+      return;
+    }
+    oldWidget.controller.removeListener(_syncBackgroundUiSettings);
+    widget.controller.addListener(_syncBackgroundUiSettings);
+    _syncBackgroundUiSettings();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _backgroundUi.dispose();
+    if (AndroidShell.supported) {
+      widget.controller.removeListener(_syncBackgroundUiSettings);
+      unawaited(_backgroundUiRemoved?.cancel());
+    }
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    super.didChangeAppLifecycleState(state);
-    if (!Platform.isAndroid) return;
-    _backgroundUi.didChangeAppLifecycleState(state);
+  void _syncBackgroundUiSettings() {
+    final ui = widget.controller.config.ui;
+    final minutes = ui.hideInBackground && ui.backgroundDestroyMinutes > 0
+        ? ui.backgroundDestroyMinutes
+        : 0;
+    if (_backgroundDestroyMinutes == minutes) return;
+    _backgroundDestroyMinutes = minutes;
+    unawaited(AndroidShell.setBackgroundDestroyMinutes(minutes));
   }
 
   static const _destinations = [

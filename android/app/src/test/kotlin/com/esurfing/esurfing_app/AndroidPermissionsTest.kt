@@ -6,6 +6,7 @@ import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -50,6 +51,7 @@ class AndroidPermissionsTest {
     fun backgroundWifiRequestsCannotShowPermissionOrSettingsUi() {
         val app = application()
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        app.attachActivity(activity)
         app.resumeActivity(activity)
         app.pauseActivity(activity)
         invoke(app, "requestWifiPermission")
@@ -80,10 +82,34 @@ class AndroidPermissionsTest {
     }
 
     @Test
+    fun wifiPermissionResultPublishesEvenWithoutAnotherActivityResume() {
+        val app = application()
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        app.attachActivity(activity)
+        app.resumeActivity(activity)
+        val monitor = invoke(app, "getWifiNetworks") as WifiNetworkMonitor
+        val grants = mutableListOf<Boolean>()
+        monitor.listen { grants.add(it.getValue("permissionGranted") as Boolean) }
+        invoke(app, "requestWifiPermission")
+        val request = shadowOf(activity).lastRequestedPermission.requestCode
+
+        app.onWifiPermissionResult(request + 1)
+        assertEquals(listOf(false), grants)
+        app.onWifiPermissionResult(request)
+        assertEquals(listOf(false, false), grants)
+        shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(
+            Manifest.permission.ACCESS_FINE_LOCATION
+        )
+        app.onWifiPermissionResult(request)
+        assertEquals(listOf(false, false, true), grants)
+    }
+
+    @Test
     @Config(sdk = [31])
     fun android12RequestsCoarseAndFineLocationTogether() {
         val app = application()
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        app.attachActivity(activity)
         app.resumeActivity(activity)
         invoke(app, "requestWifiPermission")
         assertArrayEquals(

@@ -122,7 +122,7 @@ flutter run -d android     # 需要真机/模拟器
 flutter run -d macos       # 需要 macOS/Xcode，先构建原生 dylib
 
 tool/package_windows.sh    # -> dist/esurfing-app-windows-x64.zip
-tool/package_android.sh    # -> dist/app-<abi>-release.apk
+tool/package_android.sh    # -> dist/esurfing-app-android-[<abi>-]<ver>.apk
 bash tool/package_macos.sh # -> dist/esurfing-app-macos-universal-<ver>.zip
 ```
 
@@ -156,9 +156,11 @@ Tag：从 App `1.3.0` 起每次发版打 `v<semver>`（与 `pubspec.yaml` 的版
 |---|---|---|
 | `analyze & test` | 每次 push / PR | `flutter analyze` + `flutter test` |
 | `windows x64` | 每次 push / PR | MSYS2 MinGW 编 `esurfing.dll` → `flutter build windows --release` → `dist/esurfing-app-windows-x64-<ver>.zip` |
-| `android apk` | 每次 push / PR | 重编三个 ABI 的 `libesurfing.so` → 用固定 release 密钥签名 `flutter build apk --release` → `dist/esurfing-app-android-<ver>.apk` |
+| `android apk` | 每次 push / PR | 用同一套签名和版本代码构建 `arm64-v8a`、`armeabi-v7a`、`x86_64` 三个 APK，另保留 `dist/esurfing-app-android-<ver>.apk` 作为 `all` 通用包 |
 | `macOS universal` | 每次 push / PR | 重编双架构 dylib、真实插件/桌面集成测试、通用 `.app` 压缩包（ad-hoc，未公证） |
 | `release` | 仅 `v*` tag | 检查及三平台构建全部通过后才发布；`ci/**` 不创建 Release |
+
+在 Actions 的 Artifacts 中，`android-apk-all` 和三个 `android-apk-<abi>` 分别下载；每个归档只含对应的 APK。
 
 ### 绑定的 C 库版本
 
@@ -301,15 +303,25 @@ python3 tool/make_icons.py
 `ACCESS_FINE_LOCATION`；仅获得 Android 13+ 的 `NEARBY_WIFI_DEVICES` 不等于能够读取
 当前 SSID。Android 12+ 同时申请 coarse/fine 位置权限，13+ 另申请 nearby 权限。
 首次使用请在设置页点「授权」，位置服务关闭时系统仍可能隐藏 SSID。
+启用目标 Wi-Fi 的保活时，Android 前台服务会沿用该权限识别 Wi-Fi；
+不会申请「始终允许」位置权限，也不读取地理坐标。
+
+Android 平台层还提供 `WifiShell.networkSnapshot()` 和 `WifiShell.networkEvents`，
+供会话层跟踪所有应用可见的 Wi-Fi 链路，不依赖系统默认网络或互联网验证。
+快照包含 Android `Network` 句柄、接口名、IPv4 地址/前缀及可选的 IPv4 默认网关；
+`ready` 只表示应用未被系统阻止且接口已有可用 IPv4，不要求网关，也不等同于已联网
+或已有可用票据。SSID 为空表示无法识别，而不是链路已断开。句柄只在本次连接中有效，
+不应保存到配置里。
 
 **票据保护**（容易踩的坑）
 
 - 一个 Wi-Fi 连接周期**只自动登录一次**，不会反复 login。重复 `esf_login` 会先
   `term` 掉服务端会话再重新取票，票据作废后保活会连环失败。
-- 已有会话时连上目标 Wi-Fi **什么都不做**，沿用现有票据；
-  断网重连的恢复交给核心保活线程自己退避重试（`keep_retry*`）。
-- 目标 Wi-Fi 断开时**不会**自动登出、也不会停止保活，会话与票据原样保留，
-  只写一条日志。
+- 目标 Wi-Fi 断开时暂停网络请求，保留会话、票据和保活意图；同一目标 Wi-Fi
+  恢复后立即验证旧票据。链路地址变化或票据失效才重新发现并认证，不先注销。
+  手动断开后不会因为网络变化重新登录。
+- 关联目标 Wi-Fi 的校园网请求只走该 Wi-Fi，不要求系统将其标记为可用，
+  也不切换系统默认网络。若系统实际阻止访问，应用会等待链路或报告连接错误。
 
 ## 后台运行：Android 隐藏后台 / Windows 效率模式
 
@@ -320,17 +332,14 @@ python3 tool/make_icons.py
 | `ui.hideInBackground` | 置于后台达到设定时长后销毁界面 | `false` |
 | `ui.backgroundDestroyMinutes` | 后台停留多久后销毁（分钟），0 表示不销毁 | `30` |
 
-- Dart 侧监听 `AppLifecycleState.paused/hidden` 起计时，`resumed` 立即取消；
-  到点后经 `esurfing/android` channel 调 `destroyUi`，Kotlin 侧用
-  `finishAndRemoveTask()` 销毁 Activity 并把它从最近任务里移除。
+- Flutter 将设置同步给 Android。原生主 Activity 从 `onStop()` 起计时，
+  `onStart()` 立即取消；到点后用 `finishAndRemoveTask()` 销毁 Activity 并把它从最近任务里移除。
+- 桌面图标和前台服务通知都打开同一个主任务；任务仍存在时直接返回，不会在最近任务中再建一份。
 - `FlutterEngine` 由 `EsurfingApplication` 持有（`shouldDestroyEngineWithHost() = false`），
   所以界面销毁后 Dart isolate、`SessionHost`、前台服务与保活都不受影响；
   点通知会新建 Activity 挂回同一个 engine，界面状态直接复用，不会重新初始化。
-- 计时只在后台进行，回前台立刻取消；切换到 `inactive`（下拉通知栏等）不触发。
-- `hidden/paused` 连续通知共用同一截止时间，`detached` 取消旧计时，通知重开后
-  可再次计时，避免 Activity 重建沿用过期任务。
-- 原生端保留尚未销毁 Activity 的弱引用，直到 `onDestroy()` 才按实例解绑；
-  销毁前再次确认仍在后台。权限交互只使用处于前台的 Activity。
+- 仅暂停但仍可见（例如下拉通知栏）不触发计时；Activity 重建或销毁时取消旧计时，
+  重开的界面可在再次进入后台时重新计时。权限交互只使用已恢复的前台 Activity。
 
 ### Windows 效率模式
 

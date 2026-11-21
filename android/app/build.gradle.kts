@@ -9,15 +9,24 @@ plugins {
 
 // The isolated harness is opt-in, debug-only and cannot run the production main.
 val sessionCheck = providers.gradleProperty("sessionCheck").isPresent
+val splitPerAbi = providers.gradleProperty("split-per-abi").orNull.toBoolean()
 val requestedTarget = providers.gradleProperty("target").orNull?.let {
     (if (File(it).isAbsolute) File(it) else rootProject.file("../$it")).canonicalFile
 }
 val usesSessionCheckTarget =
     requestedTarget == rootProject.file("../integration_test/android_session_main.dart").canonicalFile
+val sessionCheckAbi = if (sessionCheck) {
+    when (providers.gradleProperty("target-platform").orNull) {
+        "android-x64" -> "x86_64"
+        "android-arm64" -> "arm64-v8a"
+        else -> error("sessionCheck requires exactly one supported Android target platform")
+    }
+} else null
 require(sessionCheck || !usesSessionCheckTarget) {
     "The Android test entrypoint requires the isolated sessionCheck applicationId"
 }
 if (sessionCheck) {
+    require(!splitPerAbi) { "sessionCheck does not support split APKs" }
     require(usesSessionCheckTarget) {
         "sessionCheck requires the isolated Android test entrypoint"
     }
@@ -27,8 +36,8 @@ if (sessionCheck) {
         "sessionCheck only permits explicit debug assembly, lint and unit-test tasks"
     }
     val jni = file(providers.gradleProperty("sessionCheckJni").get())
-    require(jni.resolve("x86_64/libesurfing.so").isFile) {
-        "sessionCheck requires a separately built x86_64 backend"
+    require(jni.resolve("$sessionCheckAbi/libesurfing.so").isFile) {
+        "sessionCheck requires a separately built $sessionCheckAbi backend"
     }
 }
 
@@ -62,14 +71,13 @@ android {
         // esurfing_c 使用 getifaddrs/freeifaddrs，需要 API 24。
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
-        // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
-        // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
-        // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
-        // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        if (!splitPerAbi) {
+            ndk {
+                abiFilters += sessionCheckAbi?.let(::listOf)
+                    ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
         }
     }
 

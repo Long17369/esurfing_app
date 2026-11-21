@@ -19,12 +19,14 @@ class AppController extends ChangeNotifier {
   final CredentialStore credentials;
   final LogRepository logs;
   final HostClient _host;
+  final Stream<WifiNetworkSnapshot>? _wifiEvents;
 
   AppController({
     required this.configRepository,
     required this.credentials,
     required this.logs,
     HostClient? host,
+    this._wifiEvents,
   }) : _host = host ?? HostClient();
 
   static const MethodChannel _android = MethodChannel('esurfing/android');
@@ -38,12 +40,22 @@ class AppController extends ChangeNotifier {
   int? _sessionMode;
 
   WifiStatus _wifi = WifiStatus.unsupported;
+  WifiNetworkSnapshot _wifiNetworks = WifiNetworkSnapshot.unsupported;
+  StreamSubscription<WifiNetworkSnapshot>? _wifiNetworkSubscription;
+  String _wifiSessionSsid = '';
+  int _wifiSessionId = 0;
+  ({String accountId, String ssid, int handle})? _wifiAutoLoginSuppression;
+  bool _logoutInFlight = false;
+  SessionWifiRoute? _sentWifiRoute;
+  int? _lastSessionWifiHandle;
   Timer? _wifiTimer;
   bool _wifiPolling = false;
   String _pendingWifiSsid = '';
   DateTime? _pendingWifiDeadline;
   String _autoLoginSsidDone = '';
   bool _loginInFlight = false;
+  bool _keepServiceStarted = false;
+  bool _nativeWifiRecovery = false;
   bool _disposed = false;
   Future<void>? _shutdownFuture;
   StreamSubscription<SessionSnapshot>? _stateSubscription;
@@ -141,6 +153,7 @@ class AppController extends ChangeNotifier {
       await _host.start();
       final version = await _host.send('version');
       _nativeVersion = version['version']?.toString() ?? '';
+      _nativeWifiRecovery = version['wifiRecovery'] == true;
       logs.add('原生后端版本：$_nativeVersion');
       _nativeCompatibilityError = version['compatibilityError'] as String?;
       if (_nativeCompatibilityError != null) {
@@ -175,11 +188,8 @@ class AppController extends ChangeNotifier {
     if (WifiShell.supported && account.wifiEnabled && account.wifiAutoLogin) {
       // 开了 Wi-Fi 联动就交给联动判定：只有连在目标 Wi-Fi 上才自动登录，
       // 否则（比如还在用蜂窝 / 别的 Wi-Fi）登进去也只会拿到 102。
-      await _pollWifi();
-      if (currentSsid != account.wifiSsid.trim()) {
-        logs.add('自动连接已跳过：当前不在目标 Wi-Fi（${account.wifiSsid.trim()}）');
-        return;
-      }
+      _maybeAutoLoginOnWifi();
+      return;
     }
     _autoConnecting = true;
     try {
@@ -201,6 +211,7 @@ class AppController extends ChangeNotifier {
       _fail('请先添加账号');
       return;
     }
+    _wifiAutoLoginSuppression = null;
     if (_snapshot.isBusy || _snapshot.isOnline) {
       await login();
       return;
@@ -212,20 +223,25 @@ class AppController extends ChangeNotifier {
     }
 
     await _pollWifi();
-    if (currentSsid == target) {
+    if (_routeForSsid(target) != null) {
       await login();
       return;
     }
 
-    if (!_wifi.permissionGranted) {
+    final needsPermission = !_wifi.permissionGranted;
+    if (needsPermission) {
       await WifiShell.requestPermission();
       await _pollWifi();
+      if (_routeForSsid(target) != null) {
+        await login();
+        return;
+      }
     }
     _pendingWifiSsid = target;
     _pendingWifiDeadline = DateTime.now().add(const Duration(seconds: 120));
     logs.add('等待连接 Wi-Fi $target：已在系统面板里选好后会自动继续登录');
     notifyListeners();
-    await WifiShell.openPanel();
+    if (!needsPermission && currentSsid != target) await WifiShell.openPanel();
   }
 
   /// 放弃「等待 Wi-Fi → 自动登录」。
@@ -258,13 +274,25 @@ class AppController extends ChangeNotifier {
     _wifiTimer?.cancel();
     _wifiTimer = null;
     final needed =
-        WifiShell.supported && _config.accounts.any((a) => a.wifiEnabled);
+        (_wifiEvents != null || WifiShell.supported) &&
+        _config.accounts.any((a) => a.wifiEnabled);
     if (!needed) {
+      unawaited(_wifiNetworkSubscription?.cancel());
+      _wifiNetworkSubscription = null;
+      _wifiNetworks = WifiNetworkSnapshot.unsupported;
       _wifi = WifiStatus.unsupported;
       _pendingWifiSsid = '';
       _pendingWifiDeadline = null;
       return;
     }
+    _wifiNetworkSubscription ??= (_wifiEvents ?? WifiShell.networkEvents)
+        .listen(
+          _onWifiNetworks,
+          onError: (Object error) {
+            logs.add('Wi-Fi 状态监听失败：$error', level: LogLevel.warn);
+            _onWifiNetworks(WifiNetworkSnapshot.unsupported);
+          },
+        );
     unawaited(_pollWifi());
     _wifiTimer = Timer.periodic(
       const Duration(seconds: 5),
@@ -292,20 +320,60 @@ class AppController extends ChangeNotifier {
         previous.enabled != next.enabled ||
         previous.permissionGranted != next.permissionGranted;
 
-    if (previous.ssid != next.ssid) {
+    if (previous.ssid != next.ssid && _wifiSessionSsid.isEmpty) {
       if (next.ssid.isEmpty) {
-        logs.add(
-          'Wi-Fi 已断开'
-          '${_snapshot.isOnline ? '：会话与票据保留，保活会自行退避重试' : ''}',
-        );
+        logs.add('Wi-Fi 已断开');
       } else {
         logs.add('Wi-Fi 已连接：${next.ssid}');
       }
     }
 
-    // 用户点了「登录」，正在等系统连上目标 Wi-Fi。
+    _maybeContinueWifiLogin();
+    if (changed) notifyListeners();
+  }
+
+  SessionWifiRoute? _routeForSsid(String ssid, {SessionWifiRoute? previous}) =>
+      selectWifiRoute(_wifiNetworks, ssid, previous: previous);
+
+  void _onWifiNetworks(WifiNetworkSnapshot state) {
+    if (_disposed || _wifiNetworkSubscription == null) return;
+    _wifiNetworks = state;
+    _updateSessionWifi();
+    _maybeContinueWifiLogin();
+    notifyListeners();
+  }
+
+  void _updateSessionWifi() {
+    final ssid = _wifiSessionSsid;
+    if (ssid.isEmpty) return;
+    final previous = _sentWifiRoute;
+    final route = _routeForSsid(ssid, previous: previous);
+    if (route == null ? previous == null : previous?.sameRoute(route) == true) {
+      return;
+    }
+    if (route == null) {
+      logs.add('目标 Wi-Fi 暂不可用：保留会话票据，等待链路恢复');
+    }
+    _sentWifiRoute = route;
+    if (route != null) _lastSessionWifiHandle = route.handle;
+    unawaited(_sendWifiRoute(_wifiSessionId, route));
+  }
+
+  Future<void> _sendWifiRoute(int sessionId, SessionWifiRoute? route) async {
+    try {
+      await _host.send('updateWifi', {
+        'sessionId': sessionId,
+        'route': route?.toMap(),
+      });
+    } catch (error) {
+      if (_wifiSessionId == sessionId) _fail('更新目标 Wi-Fi 失败：$error');
+    }
+  }
+
+  void _maybeContinueWifiLogin() {
+    if (_logoutInFlight) return;
     if (_pendingWifiSsid.isNotEmpty) {
-      if (next.ssid == _pendingWifiSsid) {
+      if (_routeForSsid(_pendingWifiSsid) != null) {
         final target = _pendingWifiSsid;
         _pendingWifiSsid = '';
         _pendingWifiDeadline = null;
@@ -318,36 +386,48 @@ class AppController extends ChangeNotifier {
         final target = _pendingWifiSsid;
         _pendingWifiSsid = '';
         _pendingWifiDeadline = null;
-        _fail('等待 Wi-Fi $target 超时，请手动连接后再点登录');
-        return;
+        _fail(
+          _wifi.permissionGranted
+              ? '等待 Wi-Fi $target 超时，请确认系统定位已开启，再手动连接并登录'
+              : '无法识别目标 Wi-Fi：请授予精确位置权限后重试',
+        );
       }
+      return;
     }
 
-    _maybeAutoLoginOnWifi(previous, next);
-
-    if (changed) notifyListeners();
+    _maybeAutoLoginOnWifi();
   }
 
-  /// 发现连上目标 Wi-Fi 时自动登录。
-  ///
-  /// 只在「刚连上」这一瞬间触发一次：会话还在时绝不重复登录 ——
-  /// 重复 login 会先 term 掉服务端会话再重新取票，票一旦作废就容易出问题，
-  /// 断网重连的恢复交给核心的保活线程（它会带着原有票据退避重试）。
-  void _maybeAutoLoginOnWifi(WifiStatus previous, WifiStatus next) {
+  void _maybeAutoLoginOnWifi() {
     final target = targetSsid;
-    if (target.isEmpty) return;
-    if (next.ssid != target && _autoLoginSsidDone == target) {
+    if (_disposed || _logoutInFlight || target.isEmpty) return;
+    final route = _routeForSsid(target);
+    final suppression = _wifiAutoLoginSuppression;
+    if (suppression != null &&
+        suppression.accountId == activeAccount?.id &&
+        suppression.ssid == target) {
+      // Redacted or temporarily unready links are not a new connection.
+      if (route == null ||
+          _wifiNetworks.networks.any(
+            (link) => link.handle == suppression.handle,
+          )) {
+        return;
+      }
+      _wifiAutoLoginSuppression = null;
+      _autoLoginSsidDone = '';
+    }
+    final matched = route != null;
+    if (!matched && _autoLoginSsidDone == target) {
       // 离开目标 Wi-Fi 后清标记，下次再连回来可以重新触发一次。
       _autoLoginSsidDone = '';
     }
     final decision = decideWifiAutoLogin(
       target: target,
-      current: next.ssid,
-      previous: previous.ssid,
+      current: matched ? target : '',
       alreadyHandled: _autoLoginSsidDone,
       autoLoginEnabled: activeAccount?.wifiAutoLogin ?? false,
       hasSession: _snapshot.isOnline,
-      busy: _snapshot.isBusy,
+      busy: _loginInFlight || _snapshot.isBusy,
     );
     switch (decision) {
       case WifiAutoLoginDecision.notOnTarget:
@@ -359,7 +439,6 @@ class AppController extends ChangeNotifier {
         return;
       case WifiAutoLoginDecision.keepSession:
         _autoLoginSsidDone = target;
-        logs.add('已连上 $target，当前已有会话，沿用现有票据不重复登录');
         return;
       case WifiAutoLoginDecision.login:
         _autoLoginSsidDone = target;
@@ -373,7 +452,7 @@ class AppController extends ChangeNotifier {
     if (_disposed) return;
     if (!_canLogin()) return;
     // 登录是同步阻塞的原生调用，重复派发会连做两次 term+auth，票据也会被用掉。
-    if (_loginInFlight) return;
+    if (_loginInFlight || _logoutInFlight) return;
     _loginInFlight = true;
     try {
       await _login();
@@ -422,6 +501,37 @@ class AppController extends ChangeNotifier {
     );
 
     try {
+      final target = account.wifiSsid.trim();
+      var route = _routeForSsid(target);
+      if (WifiShell.supported &&
+          target.isNotEmpty &&
+          account.wifiConnectOnLogin &&
+          route == null) {
+        _snapshot = const SessionSnapshot(phase: SessionPhase.error);
+        _fail('目标 Wi-Fi 尚不可用，无法开始认证。');
+        return;
+      }
+      if (route != null) {
+        if (!_nativeWifiRecovery) {
+          _snapshot = const SessionSnapshot(phase: SessionPhase.error);
+          _fail('当前原生库不支持 Wi-Fi 会话恢复，请更新应用。');
+          return;
+        }
+        if (account.keepEnabled) {
+          await _setAndroidService(true, wifiLocation: true);
+          route = _routeForSsid(target, previous: route);
+          if (route == null || _disposed) {
+            await _setAndroidService(false);
+            _snapshot = const SessionSnapshot(phase: SessionPhase.error);
+            _fail('目标 Wi-Fi 已断开，未开始认证。');
+            return;
+          }
+        }
+        _wifiSessionId++;
+        _wifiSessionSsid = target;
+        _sentWifiRoute = route;
+        _lastSessionWifiHandle = route.handle;
+      }
       final result = await _host.send(
         'connect',
         SessionParams(
@@ -435,18 +545,29 @@ class AppController extends ChangeNotifier {
           mac: _config.savedMac,
           keepInterval: account.keepInterval,
           preTerm: account.preTerm,
+          wifiRoute: route,
+          wifiSessionId: _wifiSessionId,
         ).toMap(),
       );
       final ok = result['ok'] == true;
       if (!ok) {
+        _clearWifiSession();
+        await _setAndroidService(false);
         final message = result['errorMessage']?.toString() ?? '登录失败';
         final code = result['errorCode']?.toString() ?? '';
-        _lastError = _decorateError(code, message);
+        final status = result['status'];
+        final issue = route != null && status == EsfStatus.prepare
+            ? '$message。目标 Wi-Fi 的门户或认证服务未能访问，请查看连接日志。'
+            : message;
+        _lastError = _decorateError(code, issue);
         logs.add(_lastError, level: LogLevel.error);
         notifyListeners();
         return;
       }
 
+      if (route != null) {
+        unawaited(_revalidateAuthenticatedWifi(_wifiSessionId, route.handle));
+      }
       final mac = result['mac']?.toString() ?? '';
       if (mac.isNotEmpty && mac != _config.savedMac && !Platform.isWindows) {
         final nextConfig = _config.copyWith(savedMac: mac);
@@ -460,10 +581,49 @@ class AppController extends ChangeNotifier {
       logs.add('登录成功');
       if (account.keepEnabled) await startKeep();
     } catch (error) {
+      _clearWifiSession();
+      await _setAndroidService(false);
       if (_snapshot.isBusy) {
         _snapshot = const SessionSnapshot(phase: SessionPhase.error);
       }
       _fail('登录失败：$error');
+    }
+  }
+
+  Future<void> _revalidateAuthenticatedWifi(int sessionId, int handle) async {
+    bool isCurrent() =>
+        !_disposed &&
+        !_logoutInFlight &&
+        _wifiSessionId == sessionId &&
+        _sentWifiRoute?.handle == handle;
+
+    if (!isCurrent()) return;
+    final args = {'handle': handle};
+    try {
+      final reachable = await _android.invokeMethod<bool>(
+        'probeWifiInternet',
+        args,
+      );
+      if (!isCurrent() || reachable == null) return;
+      if (!reachable) {
+        logs.add('校园网认证成功，但目标 Wi-Fi 的公网探测未通过', level: LogLevel.warn);
+        return;
+      }
+      final requested = await _android.invokeMethod<bool>(
+        'requestWifiRevalidation',
+        args,
+      );
+      if (isCurrent() && requested == true) {
+        logs.add('已请求 Android 重新验证目标 Wi-Fi');
+      }
+    } on PlatformException catch (error) {
+      if (isCurrent()) {
+        logs.add('目标 Wi-Fi 重新验证请求失败：${error.code}', level: LogLevel.warn);
+      }
+    } on MissingPluginException {
+      if (isCurrent()) {
+        logs.add('当前平台未提供 Wi-Fi 重新验证接口', level: LogLevel.warn);
+      }
     }
   }
 
@@ -480,8 +640,26 @@ class AppController extends ChangeNotifier {
     return hint.isEmpty ? message : '$message$hint';
   }
 
-  Future<void> logout() async {
-    if (_snapshot.isBusy) return;
+  Future<void> logout() => _logout();
+
+  Future<void> _logout({bool reconsiderWifi = true}) async {
+    if (_loginInFlight || _logoutInFlight || _snapshot.isBusy) return;
+    _logoutInFlight = true;
+    final account = activeAccount;
+    final ssid = targetSsid;
+    final handle =
+        _routeForSsid(ssid, previous: _sentWifiRoute)?.handle ??
+        (_wifiSessionSsid == ssid ? _lastSessionWifiHandle : null);
+    if (account != null && handle != null && ssid.isNotEmpty) {
+      _wifiAutoLoginSuppression = (
+        accountId: account.id,
+        ssid: ssid,
+        handle: handle,
+      );
+    }
+    _pendingWifiSsid = '';
+    _pendingWifiDeadline = null;
+    _clearWifiSession();
     _lastError = '';
     notifyListeners();
     try {
@@ -493,18 +671,36 @@ class AppController extends ChangeNotifier {
         );
         return;
       }
+
       logs.add('已断开连接');
     } catch (error) {
       _fail('断开失败：$error');
     } finally {
-      await _setAndroidService(false);
+      try {
+        await _setAndroidService(false);
+      } finally {
+        _logoutInFlight = false;
+        if (reconsiderWifi) _maybeAutoLoginOnWifi();
+      }
     }
+  }
+
+  void _clearWifiSession() {
+    _wifiSessionId++;
+    _wifiSessionSsid = '';
+    _sentWifiRoute = null;
+    _lastSessionWifiHandle = null;
   }
 
   Future<void> startKeep() async {
     try {
       await _host.send('startKeep');
-      await _setAndroidService(true);
+      if (!_keepServiceStarted) {
+        await _setAndroidService(
+          true,
+          wifiLocation: _wifiSessionSsid.isNotEmpty,
+        );
+      }
       logs.add('保活已启动');
     } catch (error) {
       _fail('保活启动失败：$error');
@@ -522,12 +718,25 @@ class AppController extends ChangeNotifier {
   }
 
   /// 前台服务只负责持有进程，真正保活在 SessionHost。
-  Future<void> _setAndroidService(bool running) async {
+  Future<void> _setAndroidService(
+    bool running, {
+    bool wifiLocation = false,
+  }) async {
     if (!Platform.isAndroid) return;
     try {
-      await _android.invokeMethod<void>(
-        running ? 'startSessionService' : 'stopSessionService',
-      );
+      if (running) {
+        final scoped = await _android.invokeMethod<bool>(
+          'startSessionService',
+          {'wifiLocation': wifiLocation},
+        );
+        _keepServiceStarted = true;
+        if (wifiLocation && scoped != true) {
+          logs.add('未能在前台取得 Wi-Fi 识别权限；后台重连可能需要先打开应用。', level: LogLevel.warn);
+        }
+      } else {
+        _keepServiceStarted = false;
+        await _android.invokeMethod<void>('stopSessionService');
+      }
     } on PlatformException catch (error) {
       logs.add('前台服务调用失败：${error.message}', level: LogLevel.warn);
     } on MissingPluginException {
@@ -630,7 +839,7 @@ class AppController extends ChangeNotifier {
     }
     if (_config.activeAccountId == id) return;
     if (_snapshot.isOnline) {
-      await logout();
+      await _logout(reconsiderWifi: false);
       if (_snapshot.isOnline || _snapshot.isBusy) return;
     }
     final nextConfig = _config.copyWith(activeAccountId: id);
@@ -638,6 +847,7 @@ class AppController extends ChangeNotifier {
     _config = nextConfig;
     // 换了账号就换了目标 Wi-Fi，允许在新目标上重新触发一次自动登录。
     _autoLoginSsidDone = '';
+    _wifiAutoLoginSuppression = null;
     _restartWifiWatch();
     notifyListeners();
   }
@@ -723,6 +933,7 @@ class AppController extends ChangeNotifier {
   Future<void> _shutdown() async {
     _disposed = true;
     _wifiTimer?.cancel();
+    await _wifiNetworkSubscription?.cancel();
     await _stateSubscription?.cancel();
     await _eventSubscription?.cancel();
     await _host.dispose();

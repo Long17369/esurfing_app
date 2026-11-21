@@ -4,8 +4,11 @@ import 'dart:io';
 import 'package:esurfing_app/src/data/config_repository.dart';
 import 'package:esurfing_app/src/data/credential_store.dart';
 import 'package:esurfing_app/src/data/log_repository.dart';
+import 'package:esurfing_app/src/ffi/esf_models.dart';
+import 'package:esurfing_app/src/platform/wifi_shell.dart';
 import 'package:esurfing_app/src/state/app_controller.dart';
 import 'package:esurfing_app/src/state/host_client.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class MemoryLogs extends LogRepository {
@@ -18,8 +21,14 @@ class FakeHost extends HostClient {
   final String? compatibilityError;
   int connects = 0;
   int keepStarts = 0;
+  bool reportOnline = false;
   Map<String, Object?> connectResult = {};
   Map<String, Object?> disconnectResult = {'ok': true};
+  Future<Map<String, Object?>> Function()? onDisconnect;
+  final sessionStates = StreamController<SessionSnapshot>.broadcast(sync: true);
+
+  @override
+  Stream<SessionSnapshot> get states => sessionStates.stream;
 
   @override
   Future<void> start() async {}
@@ -30,15 +39,34 @@ class FakeHost extends HostClient {
     Map<String, Object?> payload = const {},
   ]) async {
     if (type == 'version') {
-      return {'version': '1.1.0', 'compatibilityError': compatibilityError};
+      return {
+        'version': '1.1.0',
+        'wifiRecovery': true,
+        'compatibilityError': compatibilityError,
+      };
     }
     if (type == 'connect') {
       connects++;
+      if (reportOnline) {
+        sessionStates.add(const SessionSnapshot(phase: SessionPhase.online));
+      }
       return connectResult;
     }
     if (type == 'startKeep') keepStarts++;
-    if (type == 'disconnect') return disconnectResult;
+    if (type == 'disconnect') {
+      final result = onDisconnect == null
+          ? disconnectResult
+          : await onDisconnect!();
+      sessionStates.add(const SessionSnapshot());
+      return result;
+    }
     return {};
+  }
+
+  @override
+  Future<void> dispose() async {
+    await sessionStates.close();
+    await super.dispose();
   }
 }
 
@@ -73,6 +101,7 @@ class DelayedShutdownHost extends FakeHost {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory directory;
   late ConfigRepository repository;
 
@@ -94,6 +123,113 @@ void main() {
 
   tearDown(() async {
     await directory.delete(recursive: true);
+  });
+
+  test('退出只暂停原 Wi-Fi 链路，注销完成后新链路自动登录一次', () async {
+    const channel = MethodChannel('esurfing/android');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final lateProbe = Completer<bool>();
+    final probes = <int>[];
+    final reports = <int>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      final handle = (call.arguments as Map<Object?, Object?>)['handle'] as int;
+      switch (call.method) {
+        case 'probeWifiInternet':
+          probes.add(handle);
+          if (handle == 1) return lateProbe.future;
+          return handle == 2;
+        case 'requestWifiRevalidation':
+          reports.add(handle);
+          return true;
+        default:
+          throw MissingPluginException();
+      }
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await repository.save(
+      const AppConfig(
+        clientId: 'test-client',
+        activeAccountId: 'a',
+        accounts: [
+          AccountProfile(
+            id: 'a',
+            account: 'offline-only',
+            wifiSsid: 'Campus',
+            wifiAutoLogin: true,
+            keepEnabled: false,
+          ),
+        ],
+      ),
+    );
+    final host = FakeHost()
+      ..reportOnline = true
+      ..connectResult = {'ok': true};
+    final updates = StreamController<WifiNetworkSnapshot>(sync: true);
+    final controller = AppController(
+      configRepository: repository,
+      credentials: FakeCredentials(),
+      logs: MemoryLogs(),
+      host: host,
+      wifiEvents: updates.stream,
+    );
+    addTearDown(() async {
+      await controller.shutdown();
+      controller.dispose();
+      await updates.close();
+    });
+    Future<void> link(
+      int? handle, {
+      bool ready = true,
+      String ssid = 'Campus',
+    }) async {
+      updates.add(
+        WifiNetworkSnapshot(
+          supported: true,
+          permissionGranted: true,
+          networks: [
+            if (handle != null)
+              WifiNetwork(
+                handle: handle,
+                ssid: ssid,
+                interfaceName: 'wlan0',
+                ipv4Addresses: const [
+                  WifiLinkAddress(address: '10.0.0.5', prefixLength: 24),
+                ],
+                ready: ready,
+              ),
+          ],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+    }
+
+    await controller.initialize();
+    await link(1);
+    expect(host.connects, 1);
+    await link(1, ready: false);
+    await controller.logout();
+    lateProbe.complete(true);
+    await link(1, ssid: '');
+    await link(1);
+    expect(host.connects, 1);
+    await link(null);
+    await link(2);
+    await link(2);
+    expect(host.connects, 2);
+
+    final disconnect = Completer<Map<String, Object?>>();
+    host.onDisconnect = () => disconnect.future;
+    final logout = controller.logout();
+    await link(null);
+    await link(3);
+    expect(host.connects, 2);
+    disconnect.complete({'ok': true});
+    await logout;
+    await link(3);
+    expect(host.connects, 3);
+    expect(probes, [1, 2, 3]);
+    expect(reports, [2]);
   });
 
   test('桌面退出等待宿主停止，重复 shutdown 不重复清理', () async {

@@ -1,4 +1,30 @@
-/// Wi-Fi 联动里最容易出错的那部分判定，单独抽成纯函数方便单测。
+import '../ffi/esf_models.dart';
+import '../platform/wifi_shell.dart';
+
+SessionWifiRoute? selectWifiRoute(
+  WifiNetworkSnapshot snapshot,
+  String ssid, {
+  SessionWifiRoute? previous,
+}) {
+  if (ssid.isEmpty || !snapshot.permissionGranted) return null;
+  final candidates = snapshot.networks.where(
+    (network) =>
+        network.ready &&
+        network.ssid == ssid &&
+        network.ipv4Addresses.isNotEmpty,
+  );
+  final preferred = candidates.where((n) => n.handle == previous?.handle);
+  final matched = preferred.isNotEmpty ? preferred : candidates;
+  if (matched.length != 1) return null;
+  final network = matched.single;
+  final addresses = network.ipv4Addresses.map((link) => link.address);
+  final previousIp = previous?.ipv4;
+  final address = addresses.contains(previousIp)
+      ? previousIp!
+      : addresses.first;
+  return SessionWifiRoute(network.handle, address, network.gateway ?? '');
+}
+
 enum WifiAutoLoginDecision {
   /// 当前不在目标 Wi-Fi，什么都不做。
   notOnTarget,
@@ -20,19 +46,20 @@ enum WifiAutoLoginDecision {
 ///
 /// 关键约束：**一个 Wi-Fi 连接周期只触发一次**，而且当前已有会话时一律不登录。
 /// 重复 `esf_login` 会先 term 掉服务端会话再重新取票，票据被作废后
-/// 保活会连环失败，所以断网重连的恢复交给核心保活线程自己退避重试。
+/// 保活会连环失败，所以已有会话只更新保活线程使用的 Wi-Fi。
 WifiAutoLoginDecision decideWifiAutoLogin({
   required String target,
   required String current,
-  required String previous,
   required String alreadyHandled,
   required bool autoLoginEnabled,
   required bool hasSession,
   required bool busy,
 }) {
   final wanted = target.trim();
-  if (wanted.isEmpty || current != wanted) return WifiAutoLoginDecision.notOnTarget;
-  if (previous == wanted || alreadyHandled == wanted) {
+  if (wanted.isEmpty || current != wanted) {
+    return WifiAutoLoginDecision.notOnTarget;
+  }
+  if (alreadyHandled == wanted) {
     return WifiAutoLoginDecision.alreadyHandled;
   }
   if (!autoLoginEnabled) return WifiAutoLoginDecision.disabled;

@@ -26,6 +26,12 @@ class SessionHost {
   NativeCallable<EsfOwnedEventCbNative>? _ownedEventCallable;
   Completer<void>? _eventsDrained;
   bool _online = false;
+  bool _keepRequested = false;
+  bool _wifiAvailable = true;
+  bool _verifyWifi = false;
+  bool _refreshWifi = false;
+  SessionWifiRoute? _wifiRoute;
+  int _wifiSessionId = 0;
   String _lastMac = '';
 
   /// 本次会话的保活节奏（秒）。只从 connect 参数来，不看全局配置。
@@ -74,6 +80,7 @@ class SessionHost {
         return {
           'version': _b.version,
           'compatibilityError': _b.sessionCompatibilityError,
+          'wifiRecovery': _b.supportsWifiRecovery,
         };
       case 'connect':
         return _connect(SessionParams.fromMap(payload));
@@ -83,6 +90,9 @@ class SessionHost {
         return _startKeep();
       case 'stopKeep':
         return _stopKeep();
+      case 'updateWifi':
+        if (payload['sessionId'] != _wifiSessionId) return const {};
+        return _updateWifi(SessionWifiRoute.fromMap(payload['route']));
       case 'keepRunning':
         final client = _client;
         return {'running': client == null ? false : _b.keepRunning(client)};
@@ -100,6 +110,9 @@ class SessionHost {
 
   Map<String, Object?> _connect(SessionParams params) {
     _b.requireSessionCompatibility();
+    if (params.wifiRoute != null && !_b.supportsWifiRecovery) {
+      throw StateError('当前原生库不支持 Wi-Fi 会话恢复，请更新应用。');
+    }
     if (params.account.isEmpty || params.password.isEmpty) {
       throw StateError('账号或密码为空');
     }
@@ -136,6 +149,12 @@ class SessionHost {
       if (params.mode != EsfMode.auto) {
         _check(_b.setMode(client, params.mode), '设置模式');
       }
+      final route = params.wifiRoute;
+      if (route != null) {
+        _setWifiRoute(client, route);
+        _wifiRoute = route;
+        _wifiSessionId = params.wifiSessionId;
+      }
 
       _sendState(SessionPhase.authenticating, '正在登录');
       final rc = _b.login(client, options, codeOut, messageOut);
@@ -164,7 +183,10 @@ class SessionHost {
       final ipOut = calloc<Pointer<Utf8>>();
       final macOut = calloc<Pointer<Utf8>>();
       try {
-        if (_b.query(client, ipOut, macOut) == EsfStatus.ok) {
+        final endpointRc = route == null
+            ? _b.query(client, ipOut, macOut)
+            : _b.getEndpoint(client, ipOut, macOut);
+        if (endpointRc == EsfStatus.ok) {
           ipv4 = _b.takeString(ipOut);
           _lastMac = _b.takeString(macOut);
         }
@@ -207,6 +229,10 @@ class SessionHost {
     final codeOut = calloc<Pointer<Utf8>>();
     final messageOut = calloc<Pointer<Utf8>>();
     try {
+      if (_wifiRoute != null && !_wifiAvailable) {
+        _sendState(SessionPhase.idle, '已断开');
+        return const {'ok': false, 'errorMessage': '目标 Wi-Fi 不可用'};
+      }
       options = _makeOptions(preTerm: false, keep: -1);
       final rc = _b.logout(client, options, codeOut, messageOut);
       final code = _b.takeString(codeOut);
@@ -233,12 +259,25 @@ class SessionHost {
     if (client == null || !_online) {
       throw StateError('尚未登录，无法保活');
     }
+    _keepRequested = true;
+    if (!_wifiAvailable) {
+      _sendState(SessionPhase.wifiWaiting, '等待目标 Wi-Fi 恢复');
+      return const {'ok': true, 'running': false};
+    }
+    return _runKeep(client);
+  }
+
+  Map<String, Object?> _runKeep(Pointer<EsfClient> client) {
     final options = _makeOptions(preTerm: false, keep: 0);
     try {
-      final rc = _b.keepStart(client, options);
+      final rc = _verifyWifi
+          ? _b.keepResume(client, options, _refreshWifi)
+          : _b.keepStart(client, options);
       if (rc != EsfStatus.ok) {
         throw StateError('esf_keep_start 失败：${EsfStatus.describe(rc)}');
       }
+      _verifyWifi = false;
+      _refreshWifi = false;
       _sendState(SessionPhase.keeping, '保活中');
       return {'ok': true, 'running': true};
     } finally {
@@ -247,11 +286,46 @@ class SessionHost {
   }
 
   Map<String, Object?> _stopKeep() {
+    _keepRequested = false;
     final client = _client;
     if (client == null) return const {'ok': true, 'running': false};
     _stopKeepInternal(client);
     _sendState(SessionPhase.online, '已停止保活');
     return const {'ok': true, 'running': false};
+  }
+
+  Map<String, Object?> _updateWifi(SessionWifiRoute? route) {
+    final client = _client;
+    final previous = _wifiRoute;
+    if (client == null || !_online || previous == null) return const {};
+    if (route == null) {
+      if (!_wifiAvailable) return const {};
+      _wifiAvailable = false;
+      _verifyWifi = true;
+      _check(_b.keepStop(client), '暂停 Wi-Fi 保活');
+      if (_keepRequested) {
+        _sendState(SessionPhase.wifiWaiting, '等待目标 Wi-Fi 恢复');
+      }
+    } else if (!_wifiAvailable || !route.sameRoute(previous)) {
+      _check(_b.keepStop(client), '停止旧网络保活');
+      _wifiAvailable = false;
+      _setWifiRoute(client, route);
+      _wifiRoute = route;
+      _wifiAvailable = true;
+      _verifyWifi = true;
+      _refreshWifi |= !route.sameLink(previous);
+      if (_keepRequested) _runKeep(client);
+    } else if (_keepRequested && _verifyWifi) {
+      _runKeep(client);
+    }
+    return const {};
+  }
+
+  void _setWifiRoute(Pointer<EsfClient> client, SessionWifiRoute route) {
+    _check(
+      _b.setAndroidNetwork(client, route.handle, route.ipv4, route.gateway),
+      '绑定目标 Wi-Fi',
+    );
   }
 
   void _stopKeepInternal(Pointer<EsfClient> client) {
@@ -342,6 +416,12 @@ class SessionHost {
     _b.destroy(client);
     _client = null;
     _online = false;
+    _wifiRoute = null;
+    _wifiSessionId = 0;
+    _wifiAvailable = true;
+    _verifyWifi = false;
+    _refreshWifi = false;
+    _keepRequested = false;
   }
 
   void _sendState(
